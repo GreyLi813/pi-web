@@ -1025,19 +1025,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [addNotice, finishPromptWithoutStream, handleExtensionUiRequest, loadSession, onAgentEnd]);
   handleAgentEventRef.current = handleAgentEvent;
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
     const trimmedMessage = message.trim();
-    if (!trimmedMessage && !images?.length) return;
-    if (agentRunningRef.current || bashRunningRef.current) return;
+    if (!trimmedMessage && !images?.length) return false;
+    if (agentRunningRef.current || bashRunningRef.current) return false;
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
 
     const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
     if (isBashCommand) {
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
-      if (!bashCmd) return;
+      if (!bashCmd) return false;
       await executeBashRef.current?.(bashCmd, isExcluded);
-      return;
+      return true;
     }
 
     const promptRunId = promptRunIdRef.current + 1;
@@ -1094,9 +1094,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ...(piImages?.length ? { images: piImages } : {}),
         });
       }
-      if (isSlashCommandPrompt && sentSessionId) {
+      if (!sentSessionId) {
+        throw new Error("No active session is available for the prompt");
+      }
+      if (isSlashCommandPrompt) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
       }
+      return true;
     } catch (e) {
       console.error("Failed to send message:", e);
       if (e instanceof EventStreamConnectionError) {
@@ -1116,6 +1120,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentRunning(false);
       setAgentPhase(null);
       dispatch({ type: "end" });
+      return false;
     }
   }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice]);
 
@@ -1206,26 +1211,35 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [loadContext]);
 
-  const handleModelChange = useCallback(async (provider: string, modelId: string) => {
+  /**
+   * Select a model and report whether the agent accepted the change.
+   *
+   * @author claude-sonnet-4-20250514
+   */
+  const handleModelChange = useCallback(async (provider: string, modelId: string): Promise<boolean> => {
     if (isNew) {
       setNewSessionModel({ provider, modelId });
       setPendingModel({ provider, modelId });
       const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-      if (!sid) return;
+      if (!sid) return true;
       try {
         await sendAgentCommand(sid, { type: "set_model", provider, modelId });
+        return true;
       } catch (e) {
         console.error("Failed to set model:", e);
+        return false;
       }
-      return;
     }
+
     const sid = sessionIdRef.current;
-    if (!sid) return;
+    if (!sid) return false;
     try {
       await sendAgentCommand(sid, { type: "set_model", provider, modelId });
       setCurrentModelOverride({ provider, modelId });
+      return true;
     } catch (e) {
       console.error("Failed to set model:", e);
+      return false;
     }
   }, [isNew, setNewSessionModel]);
 
@@ -1432,15 +1446,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [opts.chatInputRef, addNotice]);
 
-  const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
+  /**
+   * Select a thinking level and report whether the agent accepted the change.
+   *
+   * @author claude-sonnet-4-20250514
+   */
+  const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption): Promise<boolean> => {
     setThinkingLevel(level);
-    if (level === "auto") return; // "auto" leaves pi's current setting untouched
+    if (level === "auto") return true;
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-    if (!sid) return;
+    if (!sid) return false;
     try {
       await sendAgentCommand(sid, { type: "set_thinking_level", level });
+      return true;
     } catch (e) {
       console.error("Failed to set thinking level:", e);
+      return false;
     }
   }, []);
 
@@ -1489,6 +1510,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     if (session) {
       sessionIdRef.current = session.id;
+      // Keep one idle SSE subscription for the visible session so server-side
+      // schedules update the chat without requiring a page refresh.
+      void connectEvents(session.id);
       loadSession(session.id, true, true).then((agentState) => {
         if (agentState?.running) {
           loadTools(session.id);
@@ -1497,7 +1521,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             setAgentRunning(true);
             setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
             dispatch({ type: "start" });
-            void connectEvents(session.id);
             if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
               void waitForPromptSettlement(session.id);
             }

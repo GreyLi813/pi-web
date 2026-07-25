@@ -187,6 +187,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
   const sessionBusy = agentRunning || bashRunning;
+  const activeSessionId = session?.id ?? sessionIdRef.current ?? null;
 
   // Register the abort handler for the global Esc shortcut
   useEffect(() => {
@@ -313,6 +314,8 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}
+      thinkingLevelsByModel={modelThinkingLevels}
+      thinkingLevelMapsByModel={modelThinkingLevelMaps}
       retryInfo={retryInfo}
       queuedMessages={queuedMessages}
       onRecallQueue={handleRecallQueue}
@@ -325,6 +328,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
+      sessionId={activeSessionId}
     />
   );
 

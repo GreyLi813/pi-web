@@ -113,6 +113,7 @@ export class AgentSessionWrapper {
   private extensionStatuses = new Map<string, string>();
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
   private promptRunning = false;
+  private scheduledPromptStarting = false;
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
   private extensionBindingError: unknown = null;
@@ -137,7 +138,13 @@ export class AgentSessionWrapper {
   }
 
   isRunning(): boolean {
-    return this._alive && (this.promptRunning || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning);
+    return this._alive && (
+      this.scheduledPromptStarting
+      || this.promptRunning
+      || this.inner.isStreaming
+      || this.inner.isCompacting
+      || this.inner.isBashRunning
+    );
   }
 
   start(): void {
@@ -236,7 +243,7 @@ export class AgentSessionWrapper {
   }
 
   private shouldWaitForExtensions(type: string): boolean {
-    return type === "prompt" || type === "steer" || type === "follow_up" || type === "get_commands";
+    return type === "prompt" || type === "scheduled_prompt" || type === "steer" || type === "follow_up" || type === "get_commands";
   }
 
   private async withFinalRunningNotification<T>(operation: () => Promise<T>): Promise<T> {
@@ -260,7 +267,9 @@ export class AgentSessionWrapper {
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
-      if (this.isRunning()) {
+      // A visible chat keeps an SSE listener attached so server-dispatched
+      // schedules can stream into that page even after a long idle period.
+      if (this.isRunning() || this.listeners.length > 0) {
         this.resetIdleTimer();
         return;
       }
@@ -301,40 +310,90 @@ export class AgentSessionWrapper {
     this.onDestroyCallback = cb;
   }
 
+  /** Start one prompt after all session settings have been finalized.
+   *
+   * @author OpenAI Codex
+   * @version 1.0.0
+   */
+  private startPrompt(command: Record<string, unknown>): null {
+    if (this.inner.isBashRunning) {
+      throw new Error("Cannot send a prompt while a shell command is running");
+    }
+    const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
+    const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
+    this.promptRunning = true;
+    notifyRunningChange();
+    try {
+      this.inner.prompt(command.message as string, {
+        ...(promptImages?.length ? { images: promptImages } : {}),
+        ...(streamingBehavior ? { streamingBehavior } : {}),
+        source: "rpc",
+      }).then(() => {
+        this.promptRunning = false;
+        if (!streamingBehavior) this.emit({ type: "prompt_done" });
+        notifyRunningChange();
+      }).catch((error) => {
+        this.promptRunning = false;
+        invalidateSessionListCache();
+        this.emit({
+          type: "prompt_error",
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+        if (!streamingBehavior) this.emit({ type: "prompt_done" });
+        notifyRunningChange();
+      });
+      return null;
+    } catch (error) {
+      this.promptRunning = false;
+      notifyRunningChange();
+      throw error;
+    }
+  }
+
   async send(command: Record<string, unknown>): Promise<unknown> {
     this.resetIdleTimer();
     const type = command.type as string;
     if (this.shouldWaitForExtensions(type)) await this.waitForExtensionsBound();
 
     switch (type) {
-      case "prompt": {
-        if (this.inner.isBashRunning) {
-          throw new Error("Cannot send a prompt while a shell command is running");
+      case "prompt":
+        if (this.scheduledPromptStarting) {
+          throw new Error("Cannot send a prompt while a scheduled prompt is starting");
         }
-        // Fire and forget — events come via subscribe
-        const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
-        this.promptRunning = true;
+        return this.startPrompt(command);
+
+      case "scheduled_prompt": {
+        if (this.isRunning()) {
+          throw new Error("Cannot start a scheduled prompt while the session is busy");
+        }
+        const settings = command as {
+          message: string;
+          modelProvider?: string;
+          modelId?: string;
+          thinkingLevel?: string;
+        };
+        if (Boolean(settings.modelProvider) !== Boolean(settings.modelId)) {
+          throw new Error("Scheduled prompt has an incomplete model configuration");
+        }
+
+        this.scheduledPromptStarting = true;
         notifyRunningChange();
-        this.inner.prompt(command.message as string, {
-          ...(promptImages?.length ? { images: promptImages } : {}),
-          ...(streamingBehavior ? { streamingBehavior } : {}),
-          source: "rpc",
-        }).then(() => {
-          this.promptRunning = false;
-          if (!streamingBehavior) this.emit({ type: "prompt_done" });
+        try {
+          if (settings.modelProvider && settings.modelId) {
+            await this.send({
+              type: "set_model",
+              provider: settings.modelProvider,
+              modelId: settings.modelId,
+            });
+          }
+          if (settings.thinkingLevel && settings.thinkingLevel !== "auto") {
+            await this.send({ type: "set_thinking_level", level: settings.thinkingLevel });
+          }
+          return this.startPrompt({ type: "prompt", message: settings.message });
+        } finally {
+          this.scheduledPromptStarting = false;
           notifyRunningChange();
-        }).catch((error) => {
-          this.promptRunning = false;
-          invalidateSessionListCache();
-          this.emit({
-            type: "prompt_error",
-            errorMessage: error instanceof Error ? error.message : String(error),
-          });
-          if (!streamingBehavior) this.emit({ type: "prompt_done" });
-          notifyRunningChange();
-        });
-        return null;
+        }
       }
 
       case "abort":
@@ -348,7 +407,7 @@ export class AgentSessionWrapper {
           sessionId: this.inner.sessionId,
           sessionFile: this.inner.sessionFile ?? "",
           isStreaming: this.inner.isStreaming,
-          isPromptRunning: this.promptRunning,
+          isPromptRunning: this.promptRunning || this.scheduledPromptStarting,
           isBashRunning: this.inner.isBashRunning,
           isCompacting: this.inner.isCompacting,
           autoCompactionEnabled: this.inner.autoCompactionEnabled,

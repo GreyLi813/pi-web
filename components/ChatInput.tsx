@@ -9,6 +9,7 @@ import {
 } from "@/lib/file-fuzzy";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { SchedulesPanel } from "./SchedulesPanel";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -45,6 +46,10 @@ interface Props {
   onThinkingLevelChange?: (level: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => void;
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
+  /** Thinking levels indexed by provider:modelId for schedule model selection. */
+  thinkingLevelsByModel?: Record<string, string[]>;
+  /** Display mappings indexed by provider:modelId for schedule model selection. */
+  thinkingLevelMapsByModel?: Record<string, Record<string, string | null>>;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
   queuedMessages?: QueuedMessages | null;
   onRecallQueue?: () => void;
@@ -58,6 +63,8 @@ interface Props {
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
+  /** Session ID — enables schedule execution */
+  sessionId?: string | null;
 }
 
 export interface ChatInputHandle {
@@ -191,6 +198,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, onModelChange,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
+  thinkingLevelsByModel, thinkingLevelMapsByModel,
   retryInfo, queuedMessages, onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -198,6 +206,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onPromptWithStreamingBehavior,
   draftKey,
   cwd,
+  sessionId,
 }: Props, ref) {
   const isMobile = useIsMobile();
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
@@ -206,6 +215,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
+  const [schedulesPanelOpen, setSchedulesPanelOpen] = useState(false);
+
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? getDraft(draftKey)?.images.map(draftImageToAttachedImage) ?? [] : []
   ));
@@ -1250,6 +1261,30 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               </div>
             );
           })()}
+          {/* Schedules panel popup - always mounted, hidden when closed */}
+          <div
+            style={{
+              position: "absolute",
+              left: 0,
+              right: 0,
+              bottom: "calc(100% + 8px)",
+              zIndex: 120,
+              display: schedulesPanelOpen ? "flex" : "none",
+              justifyContent: "center",
+            }}
+          >
+            <SchedulesPanel
+                onClose={() => setSchedulesPanelOpen(false)}
+                modelOptions={modelOptions.length > 0 ? modelOptions : undefined}
+                currentModel={model ?? null}
+                currentThinkingLevel={thinkingLevel ?? "auto"}
+                availableThinkingLevels={availableThinkingLevels ?? null}
+                thinkingLevelMap={thinkingLevelMap ?? null}
+                thinkingLevelsByModel={thinkingLevelsByModel}
+                thinkingLevelMapsByModel={thinkingLevelMapsByModel}
+                sessionId={sessionId ?? null}
+              />
+            </div>
           <div
             style={{
               display: "flex",
@@ -1629,6 +1664,42 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 backdropFilter: "blur(10px)",
               } : null),
             }}>
+            {/* Schedules button */}
+            {!isStreaming && (
+              <div style={{ position: "relative" }}>
+                <button
+                  onClick={() => setSchedulesPanelOpen((v) => !v)}
+                  title="Manage recurring schedules"
+                  aria-label="Manage schedules"
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                    padding: isMobile ? "0 6px" : "8px 12px",
+                    height: 32,
+                    background: schedulesPanelOpen ? "var(--bg-hover)" : "none",
+                    border: "none",
+                    borderRadius: 9,
+                    color: schedulesPanelOpen ? "var(--accent)" : "var(--text-muted)",
+                    cursor: "pointer",
+                    fontSize: 12,
+                    transition: "background 0.12s, color 0.12s",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = "var(--bg-hover)";
+                    e.currentTarget.style.color = "var(--accent)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = schedulesPanelOpen ? "var(--bg-hover)" : "none";
+                    e.currentTarget.style.color = schedulesPanelOpen ? "var(--accent)" : "var(--text-muted)";
+                  }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10" />
+                    <polyline points="12 6 12 12 16 14" />
+                  </svg>
+                  {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>Schedule</span>}
+                </button>
+              </div>
+            )}
             {!isStreaming && onThinkingLevelChange && (
               <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
                 <button
