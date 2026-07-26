@@ -1,6 +1,6 @@
-import { readdir, realpath, stat } from "fs/promises";
-import { homedir } from "os";
+import { opendir, realpath, stat } from "fs/promises";
 import path from "path";
+import { getRuntimeHomeDirectory } from "@/lib/runtime-paths";
 
 export interface BrowsableDirectory {
   name: string;
@@ -8,12 +8,12 @@ export interface BrowsableDirectory {
 }
 
 export function getBrowseStartDirectory(directory?: string): string {
-  return directory || homedir();
+  return directory || getRuntimeHomeDirectory();
 }
 
 export function normalizeDirectory(directory: string): string {
-  if (directory === "~") return homedir();
-  if (directory.startsWith("~/")) return path.resolve(homedir(), directory.slice(2));
+  if (directory === "~") return getRuntimeHomeDirectory();
+  if (directory.startsWith("~/")) return path.resolve(getRuntimeHomeDirectory(), directory.slice(2));
   return path.resolve(directory);
 }
 
@@ -31,7 +31,20 @@ export async function resolveDirectory(directory: string): Promise<string> {
 }
 
 export async function listDirectories(directory: string): Promise<BrowsableDirectory[]> {
-  const entries = await readdir(directory, { withFileTypes: true });
+  // Avoid readdir here: Next.js file tracing interprets a browsable runtime
+  // directory as a build input and can otherwise traverse the user's home.
+  const entries = [];
+  const directoryHandle = await opendir(directory);
+  try {
+    let entry = await directoryHandle.read();
+    while (entry) {
+      entries.push(entry);
+      entry = await directoryHandle.read();
+    }
+  } finally {
+    await directoryHandle.close();
+  }
+
   // 忽略损坏、不可访问或不指向目录的符号链接。
   const candidates = await Promise.all(entries.map(async (entry) => {
     if (entry.isDirectory()) {

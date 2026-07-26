@@ -13,8 +13,7 @@
 
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { dirname, join } from "path";
-import { homedir } from "os";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
 import { resolveSessionPath } from "@/lib/session-reader";
 import {
@@ -64,11 +63,9 @@ const scheduleRuntime = globalThis as ScheduleRuntime;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-/** Resolve the schedules file path under ~/.pi/agent/ */
+/** Resolve the schedules file path under the active Pi Agent directory. */
 function getSchedulesPath(): string {
-  const agentDir = process.env.PI_CODING_AGENT_DIR
-    || join(homedir(), ".pi", "agent");
-  return join(agentDir, "schedules.json");
+  return join(getAgentDir(), "schedules.json");
 }
 
 /** Read the persistent schedules store. Returns empty array on any error. */
