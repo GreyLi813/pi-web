@@ -1,10 +1,10 @@
 /**
  * SchedulesPanel — Modal for managing recurring prompt schedules.
  *
- * Displays session-bound persistent schedules and allows CRUD with model selection.
+ * Displays session-bound schedules with pause, edit, resume, and model controls.
  *
- * @author claude-sonnet-4-20250514
- * @version 1.1.0
+ * @author claude-sonnet-4-20250514, OpenAI Codex
+ * @version 1.2.0
  */
 
 "use client";
@@ -51,6 +51,10 @@ interface SchedulesPanelProps {
   thinkingLevelMapsByModel?: Record<string, Record<string, string | null>>;
   /** Session receiving schedules created in this panel. */
   sessionId?: string | null;
+  /** Whether an unsaved chat can be promoted into a schedule session. */
+  canCreateSession?: boolean;
+  /** Create and select a dedicated session for the first schedule. */
+  onEnsureSession?: () => Promise<string | null>;
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -102,12 +106,16 @@ export function SchedulesPanel({
   thinkingLevelsByModel,
   thinkingLevelMapsByModel,
   sessionId,
+  canCreateSession = false,
+  onEnsureSession,
 }: SchedulesPanelProps) {
   const [schedules, setSchedules] = useState<ScheduleEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [showAddForm, setShowAddForm] = useState(false);
+  const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null);
+  const [actionScheduleId, setActionScheduleId] = useState<string | null>(null);
   const [newInterval, setNewInterval] = useState(300);
   const [newPrompt, setNewPrompt] = useState("");
   const [newModel, setNewModel] = useState(currentModel?.modelId ?? "");
@@ -147,10 +155,14 @@ export function SchedulesPanel({
 
   const handleAdd = async () => {
     if (!newPrompt.trim()) { setAddError("Enter a prompt."); return; }
-    if (!sessionId) { setAddError("Open a saved session before creating a schedule."); return; }
     setAdding(true);
     setAddError(null);
     try {
+      const targetSessionId = sessionId ?? await onEnsureSession?.();
+      if (!targetSessionId) {
+        throw new Error("Select a workspace so a schedule session can be created.");
+      }
+
       const res = await fetch("/api/schedules", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -161,13 +173,14 @@ export function SchedulesPanel({
           modelProvider: newProvider || undefined,
           modelId: newModel || undefined,
           thinkingLevel: newThinkingLevel !== "auto" ? newThinkingLevel : undefined,
-          sessionId,
+          sessionId: targetSessionId,
         }),
       });
       const data = await res.json() as { schedule?: ScheduleEntry; error?: string };
       if (!res.ok || data.error) throw new Error(data.error ?? `HTTP ${res.status}`);
       await fetchSchedules();
       setShowAddForm(false);
+      setEditingScheduleId(null);
       setNewPrompt("");
       setNewInterval(300);
     } catch (e) {
@@ -196,15 +209,95 @@ export function SchedulesPanel({
     }
   };
 
-  /** Remove a schedule.
-   *
-   * @author claude-sonnet-4-20250514
-   */
+  const closeForm = () => {
+    setShowAddForm(false);
+    setEditingScheduleId(null);
+    setAddError(null);
+  };
+
+  /** Open the shared form for a paused schedule. */
+  const handleStartEdit = (schedule: ScheduleEntry) => {
+    if (schedule.enabled) {
+      setError("Pause the schedule before editing it.");
+      return;
+    }
+    setError(null);
+    setAddError(null);
+    setEditingScheduleId(schedule.id);
+    setNewInterval(schedule.intervalSeconds);
+    setNewPrompt(schedule.prompt);
+    setNewProvider(schedule.modelProvider ?? "");
+    setNewModel(schedule.modelId ?? "");
+    setNewThinkingLevel(schedule.thinkingLevel ?? "auto");
+    setShowAddForm(true);
+  };
+
+  /** Save editable fields while preserving ownership and execution history. */
+  const handleSaveEdit = async () => {
+    if (!editingScheduleId) return;
+    if (!newPrompt.trim()) { setAddError("Enter a prompt."); return; }
+    setAdding(true);
+    setAddError(null);
+    try {
+      const res = await fetch("/api/schedules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: editingScheduleId,
+          action: "update",
+          intervalSeconds: newInterval,
+          prompt: newPrompt.trim(),
+          modelProvider: newProvider,
+          modelId: newModel,
+          thinkingLevel: newThinkingLevel,
+        }),
+      });
+      const data = await res.json() as { schedule?: ScheduleEntry; error?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `HTTP ${res.status}`);
+      await fetchSchedules();
+      closeForm();
+    } catch (editError) {
+      setAddError(editError instanceof Error ? editError.message : String(editError));
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  /** Pause or resume without changing configuration or execution history. */
+  const handleLifecycleAction = async (id: string, action: "pause" | "resume") => {
+    setActionScheduleId(id);
+    setError(null);
+    try {
+      const res = await fetch("/api/schedules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, action }),
+      });
+      const data = await res.json() as { schedule?: ScheduleEntry; error?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `HTTP ${res.status}`);
+      await fetchSchedules();
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : String(actionError));
+    } finally {
+      setActionScheduleId(null);
+    }
+  };
+
+  /** Remove a schedule. */
   const handleDelete = async (id: string) => {
+    setActionScheduleId(id);
+    setError(null);
     try {
       const res = await fetch(`/api/schedules?id=${encodeURIComponent(id)}`, { method: "DELETE" });
-      if (res.ok) await fetchSchedules();
-    } catch { /* ignore */ }
+      const data = await res.json() as { error?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `HTTP ${res.status}`);
+      if (editingScheduleId === id) closeForm();
+      await fetchSchedules();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : String(deleteError));
+    } finally {
+      setActionScheduleId(null);
+    }
   };
 
   // ── Render helpers ────────────────────────────────────────────────────
@@ -213,6 +306,7 @@ export function SchedulesPanel({
     schedule.sessionId === sessionId || schedule.sessionId === undefined,
   );
   const activeCount = visibleSchedules.filter((schedule) => schedule.enabled).length;
+  const addDisabled = schedules.length >= 50 || (!sessionId && !canCreateSession);
 
   const selectedModelKey = newProvider && newModel ? `${newProvider}:${newModel}` : undefined;
   const selectedThinkingLevels = selectedModelKey
@@ -273,47 +367,94 @@ export function SchedulesPanel({
           </div>
         )}
 
-        {visibleSchedules.map((s) => (
-          <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 7, border: "1px solid var(--border)", marginBottom: 6, opacity: s.enabled ? 1 : 0.5 }}>
-            <span style={{ flexShrink: 0, fontSize: 13, color: s.enabled ? "var(--accent)" : "var(--text-dim)" }}>{s.enabled ? "▶" : "⏸"}</span>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12, fontWeight: 500, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2 }}>{s.prompt}</div>
-              <div style={{ fontSize: 11, color: "var(--text-dim)", display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <span>Every {formatInterval(s.intervalSeconds)}</span>
-                <span>{formatCountdown(s.nextFireAt)}</span>
-                {s.fireCount > 0 && <span>Fired {s.fireCount}×</span>}
-                {s.modelId && <span style={{ color: "var(--accent)", fontSize: 10 }}>{s.modelId}</span>}
-                {s.thinkingLevel && s.thinkingLevel !== "auto" && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>🧠{s.thinkingLevel}</span>}
-                {!s.sessionId && <span style={{ fontSize: 10, color: "#d97706" }}>unbound</span>}
+        {visibleSchedules.map((schedule) => {
+          const actionPending = actionScheduleId === schedule.id;
+          const actionButtonStyle = {
+            flexShrink: 0,
+            padding: "3px 7px",
+            background: "none",
+            border: "1px solid var(--border)",
+            borderRadius: 5,
+            color: "var(--text-muted)",
+            cursor: actionPending ? "wait" : "pointer",
+            fontSize: 10,
+            opacity: actionPending ? 0.5 : 1,
+          } as const;
+
+          return (
+            <div key={schedule.id} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 10px", borderRadius: 7, border: "1px solid var(--border)", marginBottom: 6, opacity: schedule.enabled ? 1 : 0.72 }}>
+              <span style={{ flexShrink: 0, fontSize: 13, color: schedule.enabled ? "var(--accent)" : "var(--text-dim)" }}>{schedule.enabled ? "▶" : "⏸"}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 500, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2 }}>{schedule.prompt}</div>
+                <div style={{ fontSize: 11, color: "var(--text-dim)", display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <span>Every {formatInterval(schedule.intervalSeconds)}</span>
+                  {schedule.enabled
+                    ? <span>{formatCountdown(schedule.nextFireAt)}</span>
+                    : <span style={{ color: "#d97706" }}>Paused</span>}
+                  {schedule.fireCount > 0 && <span>Fired {schedule.fireCount}×</span>}
+                  {schedule.modelId && <span style={{ color: "var(--accent)", fontSize: 10 }}>{schedule.modelId}</span>}
+                  {schedule.thinkingLevel && schedule.thinkingLevel !== "auto" && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>🧠{schedule.thinkingLevel}</span>}
+                  {!schedule.sessionId && <span style={{ fontSize: 10, color: "#d97706" }}>unbound</span>}
+                </div>
               </div>
-            </div>
-            {!s.sessionId && sessionId && (
-              <button onClick={() => void handleBindToCurrentSession(s.id)} title="Bind this schedule to the current session" style={{ flexShrink: 0, padding: "3px 7px", background: "none", border: "1px solid var(--accent)", borderRadius: 5, color: "var(--accent)", cursor: "pointer", fontSize: 10 }}>
-                Bind here
+              {!schedule.sessionId && sessionId && (
+                <button type="button" onClick={() => void handleBindToCurrentSession(schedule.id)} title="Bind this schedule to the current session" style={{ ...actionButtonStyle, borderColor: "var(--accent)", color: "var(--accent)" }}>
+                  Bind here
+                </button>
+              )}
+              {schedule.enabled ? (
+                <button type="button" onClick={() => void handleLifecycleAction(schedule.id, "pause")} disabled={actionPending} title="Pause schedule" style={actionButtonStyle}>
+                  {actionPending ? "..." : "Pause"}
+                </button>
+              ) : (
+                <>
+                  <button type="button" onClick={() => handleStartEdit(schedule)} disabled={actionPending} title="Edit paused schedule" style={actionButtonStyle}>
+                    Edit
+                  </button>
+                  <button type="button" onClick={() => void handleLifecycleAction(schedule.id, "resume")} disabled={actionPending} title="Resume from a fresh interval" style={{ ...actionButtonStyle, borderColor: "var(--accent)", color: "var(--accent)" }}>
+                    {actionPending ? "..." : "Resume"}
+                  </button>
+                </>
+              )}
+              <button type="button" onClick={() => void handleDelete(schedule.id)} disabled={actionPending} title="Delete schedule" style={{ flexShrink: 0, width: 26, height: 26, padding: 0, background: "none", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-dim)", cursor: actionPending ? "wait" : "pointer", opacity: actionPending ? 0.5 : 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
               </button>
-            )}
-            <button onClick={() => handleDelete(s.id)} title="Cancel" style={{ flexShrink: 0, width: 26, height: 26, padding: 0, background: "none", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-dim)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-            </button>
-          </div>
-        ))}
+            </div>
+          );
+        })}
       </div>
 
-      {/* Add form */}
+      {/* Add/edit form */}
       {showAddForm && (
         <div style={{ padding: "10px 14px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", marginBottom: 3 }}>
+            {editingScheduleId ? "Edit paused schedule" : "New schedule"}
+          </div>
+          <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 8 }}>
+            {editingScheduleId
+              ? "Saving keeps this schedule paused. Resume it when ready."
+              : sessionId ? "The schedule starts immediately after creation." : "A dedicated schedule session will be created automatically."}
+          </div>
           <div style={{ marginBottom: 8 }}>
             <label style={{ display: "block", fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>Interval</label>
             <select value={newInterval} onChange={(e) => setNewInterval(Number(e.target.value))}
               style={{ width: "100%", padding: "6px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 12, outline: "none" }}>
-              {INTERVAL_PRESETS.map((p) => <option key={p.seconds} value={p.seconds}>{p.label}</option>)}
+              {!INTERVAL_PRESETS.some((preset) => preset.seconds === newInterval) && (
+                <option value={newInterval}>{formatInterval(newInterval)} (current)</option>
+              )}
+              {INTERVAL_PRESETS.map((preset) => <option key={preset.seconds} value={preset.seconds}>{preset.label}</option>)}
             </select>
           </div>
 
           <div style={{ marginBottom: 8 }}>
             <label style={{ display: "block", fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>Prompt</label>
             <input type="text" value={newPrompt} onChange={(e) => { setNewPrompt(e.target.value); setAddError(null); }}
-              onKeyDown={(e) => { if (e.key === "Enter" && !adding) void handleAdd(); if (e.key === "Escape") { setShowAddForm(false); setAddError(null); } }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !adding) {
+                  void (editingScheduleId ? handleSaveEdit() : handleAdd());
+                }
+                if (e.key === "Escape") closeForm();
+              }}
               placeholder="e.g., Check server health..." autoFocus
               style={{ width: "100%", padding: "6px 8px", borderRadius: 6, border: `1px solid ${addError ? "#dc2626" : "var(--border)"}`, background: "var(--bg)", color: "var(--text)", fontSize: 12, outline: "none", boxSizing: "border-box" }} />
             {addError && <div style={{ fontSize: 11, color: "#dc2626", marginTop: 3 }}>{addError}</div>}
@@ -359,11 +500,11 @@ export function SchedulesPanel({
           </div>
 
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-            <button onClick={() => { setShowAddForm(false); setAddError(null); }}
+            <button type="button" onClick={closeForm}
               style={{ padding: "4px 12px", borderRadius: 5, border: "1px solid var(--border)", background: "none", color: "var(--text-muted)", fontSize: 12, cursor: "pointer" }}>Cancel</button>
-            <button onClick={() => void handleAdd()} disabled={adding || !newPrompt.trim()}
+            <button type="button" onClick={() => void (editingScheduleId ? handleSaveEdit() : handleAdd())} disabled={adding || !newPrompt.trim()}
               style={{ padding: "4px 14px", borderRadius: 5, border: "1px solid var(--accent)", background: "var(--accent)", color: "#fff", fontSize: 12, fontWeight: 500, cursor: adding || !newPrompt.trim() ? "not-allowed" : "pointer", opacity: adding || !newPrompt.trim() ? 0.5 : 1 }}>
-              {adding ? "Adding..." : "Add Schedule"}
+              {adding ? (editingScheduleId ? "Saving..." : "Adding...") : editingScheduleId ? "Save Changes" : "Add Schedule"}
             </button>
           </div>
         </div>
@@ -372,14 +513,18 @@ export function SchedulesPanel({
       {/* Footer */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
         {!showAddForm && (
-          <button onClick={() => {
+          <button type="button" onClick={() => {
+            setEditingScheduleId(null);
+            setNewPrompt("");
+            setNewInterval(300);
             setNewModel(currentModel?.modelId ?? "");
             setNewProvider(currentModel?.provider ?? "");
             setNewThinkingLevel(currentThinkingLevel ?? "auto");
+            setAddError(null);
             setShowAddForm(true);
-          }} disabled={schedules.length >= 50 || !sessionId}
-            title={!sessionId ? "Open a saved session first" : schedules.length >= 50 ? "Max 50 schedules" : "Add schedule"}
-            style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 12px", borderRadius: 6, border: "1px solid var(--border)", background: "none", color: "var(--text-muted)", fontSize: 12, cursor: schedules.length >= 50 || !sessionId ? "not-allowed" : "pointer", opacity: schedules.length >= 50 || !sessionId ? 0.4 : 1, flex: 1, justifyContent: "center" }}>
+          }} disabled={addDisabled}
+            title={schedules.length >= 50 ? "Max 50 schedules" : addDisabled ? "Select a workspace first" : "Add schedule"}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 12px", borderRadius: 6, border: "1px solid var(--border)", background: "none", color: "var(--text-muted)", fontSize: 12, cursor: addDisabled ? "not-allowed" : "pointer", opacity: addDisabled ? 0.4 : 1, flex: 1, justifyContent: "center" }}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
             New Schedule
           </button>

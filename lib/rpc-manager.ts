@@ -515,6 +515,14 @@ export class AgentSessionWrapper {
         return null;
       }
 
+      case "persist_session": {
+        const sessionFile = this.inner.sessionManager.persistSession();
+        if (!sessionFile) throw new Error("Session persistence is disabled");
+        cacheSessionPath(this.inner.sessionId, sessionFile);
+        invalidateSessionListCache();
+        return { sessionFile };
+      }
+
       case "get_session_stats": {
         return {
           ...this.inner.getSessionStats(),

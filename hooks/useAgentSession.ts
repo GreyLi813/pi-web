@@ -13,6 +13,7 @@ import { normalizeToolCalls } from "@/lib/normalize";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import { DEFAULT_SCHEDULE_SESSION_NAME, ensureScheduleSession } from "@/lib/schedule-session";
 
 export interface SessionData {
   sessionId: string;
@@ -519,7 +520,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [setToolPresetState]);
 
-  const promoteNewSession = useCallback((messageCount = 0, firstMessage = "(no messages)") => {
+  const promoteNewSession = useCallback((messageCount = 0, firstMessage = "(no messages)", name?: string) => {
     const sid = sessionIdRef.current;
     if (!isNew || !newSessionCwd || !sid || newSessionPromotedRef.current) return;
     newSessionPromotedRef.current = true;
@@ -527,7 +528,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       id: sid,
       path: "",
       cwd: newSessionCwd,
-      name: undefined,
+      name,
       created: new Date().toISOString(),
       modified: new Date().toISOString(),
       messageCount,
@@ -645,6 +646,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     result.source.close();
     throw new EventStreamConnectionError(result.status);
   }, [connectEvents]);
+
+  const handleEnsureScheduleSession = useCallback(async () => ensureScheduleSession({
+    sessionId: session?.id ?? sessionIdRef.current,
+    createSession: ensureNewSession,
+    initializeSession: async (createdSessionId) => {
+      await ensureEventsConnected(createdSessionId);
+      await sendAgentCommand(createdSessionId, {
+        type: "set_session_name",
+        name: DEFAULT_SCHEDULE_SESSION_NAME,
+      });
+      await sendAgentCommand(createdSessionId, { type: "persist_session" });
+    },
+    promoteSession: () => promoteNewSession(0, "(scheduled tasks)", DEFAULT_SCHEDULE_SESSION_NAME),
+  }), [ensureEventsConnected, ensureNewSession, promoteNewSession, session?.id]);
 
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
@@ -1658,7 +1673,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    handleToolPresetChange, handleThinkingLevelChange, handleEnsureScheduleSession,
+    loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     // Subscriptions

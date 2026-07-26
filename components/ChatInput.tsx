@@ -63,8 +63,10 @@ interface Props {
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
-  /** Session ID — enables schedule execution */
+  /** Existing session receiving schedules created from this chat. */
   sessionId?: string | null;
+  /** Create and promote a dedicated session when this is an unsaved chat. */
+  onEnsureScheduleSession?: () => Promise<string | null>;
 }
 
 export interface ChatInputHandle {
@@ -207,6 +209,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   draftKey,
   cwd,
   sessionId,
+  onEnsureScheduleSession,
 }: Props, ref) {
   const isMobile = useIsMobile();
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
@@ -1283,6 +1286,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 thinkingLevelsByModel={thinkingLevelsByModel}
                 thinkingLevelMapsByModel={thinkingLevelMapsByModel}
                 sessionId={sessionId ?? null}
+                canCreateSession={Boolean(cwd && onEnsureScheduleSession)}
+                onEnsureSession={onEnsureScheduleSession}
               />
             </div>
           <div
