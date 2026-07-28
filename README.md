@@ -68,6 +68,8 @@ npx @agegr/pi-web@latest
 
 - **Pick work back up**: browse previous pi conversations by project without digging through terminal history or session paths.
 - **Try different directions safely**: continue from an earlier message or fork a session into a separate route.
+- **Orchestrate clean worker sessions**: let a controller session create and repeatedly prompt independent persisted sessions for unbiased review, validation, or delegated work.
+- **Delegate in parallel**: run bounded independent tasks concurrently and continue any resulting worker later by Session ID.
 - **Work across branches**: switch Git worktrees from the sidebar so new sessions and the Explorer follow the checkout you choose.
 - **Chat beside the project**: browse files on the left and preview source, docs, images, audio, and PDFs on the right while the agent works.
 - **See session state clearly**: context usage, cost, compaction state, and system prompt details are visible from the top bar.
@@ -81,6 +83,8 @@ npx @agegr/pi-web@latest
 - **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions.
 - **Git worktrees**: see [Worktrees in Pi Web](./docs/worktrees.md) for when the switcher appears, how new worktrees are created, and what removal does.
 - **Forks vs in-session branches**: Fork creates a new `.jsonl` file. "Edit from here" creates another branch inside the same session file.
+- **Orchestrated workers are not forks**: each worker starts with clean message history. Ownership binds both the controller ID and exact controller JSONL file, and the sidebar marks workers/delegates distinctly.
+- **Worker restrictions survive reopening**: persisted model, Thinking, and exact tool profiles apply on every owner-host cold open. Runtime extension handlers/tools are suppressed (extension-provided model registration remains available); direct CLI/SDK resume and generic worker mutation/startup routes are denied, while a live worker remains read-only observable in the UI; and a process-lifetime lease rejects a second runtime. Cancellation removes only never-started delegates. Running/starting Sessions cannot be deleted, worker deletion requires the cross-process lease, and controllers with owned workers cannot be deleted.
 
 ## Development
 
@@ -131,6 +135,7 @@ lib/
   directory-browser.ts # directory normalization and safe listing helpers
   http-dispatcher.ts  # HTTP(S) proxy setup for server-side fetch
   rpc-manager.ts      # AgentSessionWrapper lifecycle and global registry
+  session-orchestration-host.ts # routes clean workers through the shared registry
   session-reader.ts   # parses .jsonl session files and branch contexts
   normalize.ts        # normalizes toolCall field names
   file-access.ts      # file read safety boundary

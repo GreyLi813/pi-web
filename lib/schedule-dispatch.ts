@@ -14,6 +14,7 @@ export interface PersistentSchedule {
 
 export interface ScheduleAgent {
   isRunning(): boolean;
+  isOrchestratedWorker?(): boolean;
   send(command: Record<string, unknown>): Promise<unknown>;
 }
 
@@ -50,7 +51,7 @@ export async function dispatchScheduleToAgent(
   schedule: PersistentSchedule,
   agent: ScheduleAgent,
 ): Promise<boolean> {
-  if (!schedule.sessionId || agent.isRunning()) return false;
+  if (!schedule.sessionId || agent.isRunning() || agent.isOrchestratedWorker?.()) return false;
   if (Boolean(schedule.modelProvider) !== Boolean(schedule.modelId)) {
     throw new Error(`Schedule '${schedule.id}' has an incomplete model configuration`);
   }

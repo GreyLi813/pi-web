@@ -1,14 +1,29 @@
-import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, Theme } from "@earendil-works/pi-coding-agent";
+import {
+  acquireOrchestratedSessionRuntimeLease,
+  createAgentSessionFromServices,
+  createAgentSessionServices,
+  createSessionOrchestrationExtension,
+  getAgentDir,
+  getSessionOrchestrationToolNames,
+  initTheme,
+  isolateOrchestratedSessionExtensions,
+  isSessionOrchestrationMetadata,
+  type OrchestratedSessionRuntimeLease,
+  SessionManager,
+  type SessionOrchestrationOwnerCapability,
+  Theme,
+} from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, writeFileSync } from "fs";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
-import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
+import { cacheSessionPath, invalidateSessionListCache, invalidateSessionPathCache } from "./session-reader";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
+import { createWebSessionOrchestrationHost, type WebSessionOrchestrationHost } from "./session-orchestration-host";
 
 // ============================================================================
 // Types
@@ -58,6 +73,24 @@ type ExtensionCommandContextActionsLike = {
 type ExtensionBindingOptions = {
   forceEmptySystemPrompt?: boolean;
 };
+
+const ORCHESTRATION_OWNER_HOST_CAPABILITY = Symbol("orchestration-owner-host");
+
+export interface StartRpcSessionOptions {
+  includeExtensionTools?: boolean;
+  enableSessionOrchestration?: boolean;
+  preserveSystemPromptWithoutTools?: boolean;
+  /** Internal identity proving that WebSessionOrchestrationHost validated ownership. */
+  orchestrationOwnerHostCapability?: symbol;
+  /** Opaque authority minted by the active owning controller extension. */
+  orchestrationOwnerCapability?: SessionOrchestrationOwnerCapability;
+}
+
+export interface OrchestratedRuntimePolicy {
+  toolNames: string[];
+  model?: { provider: string; modelId: string };
+  thinkingLevel?: string;
+}
 
 const CODING_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
@@ -115,16 +148,22 @@ export class AgentSessionWrapper {
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
   private promptRunning = false;
   private scheduledPromptStarting = false;
+  private promptCompletion: Promise<void> | null = null;
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
   private extensionBindingError: unknown = null;
   private forceEmptySystemPrompt = false;
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
-  private onDestroyCallback: (() => void) | null = null;
+  private onDestroyCallback: (() => void | Promise<void>) | null = null;
+  private destroyCompletion: Promise<void> | null = null;
+  private deletionReserved = false;
   private _alive = true;
 
-  constructor(public readonly inner: AgentSessionLike) {}
+  constructor(
+    public readonly inner: AgentSessionLike,
+    private readonly orchestrationPolicy?: OrchestratedRuntimePolicy,
+  ) {}
 
   get sessionId(): string {
     return this.inner.sessionId;
@@ -136,6 +175,35 @@ export class AgentSessionWrapper {
 
   isAlive(): boolean {
     return this._alive;
+  }
+
+  /** Atomically prevent new commands when an idle Session is about to be deleted.
+   *
+   * @author GPT-5.6 Sol
+   * @version 1.0.0
+   */
+  reserveDeletion(): boolean {
+    if (!this._alive || this.deletionReserved || this.isRunning()) return false;
+    this.deletionReserved = true;
+    return true;
+  }
+
+  /** Reopen command admission when deletion fails before unlinking the Session.
+   *
+   * @author GPT-5.6 Sol
+   * @version 1.0.0
+   */
+  releaseDeletionReservation(): void {
+    this.deletionReserved = false;
+  }
+
+  /** Report whether persisted orchestration policy governs this wrapper.
+   *
+   * @author GPT-5.6 Sol
+   * @version 1.0.0
+   */
+  isOrchestratedWorker(): boolean {
+    return this.orchestrationPolicy !== undefined;
   }
 
   isRunning(): boolean {
@@ -244,7 +312,12 @@ export class AgentSessionWrapper {
   }
 
   private shouldWaitForExtensions(type: string): boolean {
-    return type === "prompt" || type === "scheduled_prompt" || type === "steer" || type === "follow_up" || type === "get_commands";
+    return type === "prompt"
+      || type === "scheduled_prompt"
+      || type === "orchestrated_prompt"
+      || type === "steer"
+      || type === "follow_up"
+      || type === "get_commands";
   }
 
   private async withFinalRunningNotification<T>(operation: () => Promise<T>): Promise<T> {
@@ -307,16 +380,16 @@ export class AgentSessionWrapper {
     };
   }
 
-  onDestroy(cb: () => void): void {
+  onDestroy(cb: () => void | Promise<void>): void {
     this.onDestroyCallback = cb;
   }
 
-  /** Start one prompt after all session settings have been finalized.
+  /** Begin one prompt and retain its completion promise for server-side orchestration.
    *
-   * @author OpenAI Codex
+   * @author GPT-5.6 Sol
    * @version 1.0.0
    */
-  private startPrompt(command: Record<string, unknown>): null {
+  private beginPrompt(command: Record<string, unknown>): Promise<void> {
     if (this.inner.isBashRunning) {
       throw new Error("Cannot send a prompt while a shell command is running");
     }
@@ -324,37 +397,189 @@ export class AgentSessionWrapper {
     const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
     this.promptRunning = true;
     notifyRunningChange();
+
+    let innerCompletion: Promise<void>;
     try {
-      this.inner.prompt(command.message as string, {
+      innerCompletion = this.inner.prompt(command.message as string, {
         ...(promptImages?.length ? { images: promptImages } : {}),
         ...(streamingBehavior ? { streamingBehavior } : {}),
         source: "rpc",
-      }).then(() => {
-        this.promptRunning = false;
-        if (!streamingBehavior) this.emit({ type: "prompt_done" });
-        notifyRunningChange();
-      }).catch((error) => {
-        this.promptRunning = false;
-        invalidateSessionListCache();
-        this.emit({
-          type: "prompt_error",
-          errorMessage: error instanceof Error ? error.message : String(error),
-        });
-        if (!streamingBehavior) this.emit({ type: "prompt_done" });
-        notifyRunningChange();
       });
-      return null;
     } catch (error) {
       this.promptRunning = false;
       notifyRunningChange();
       throw error;
     }
+
+    const completion = innerCompletion
+      .catch((error) => {
+        invalidateSessionListCache();
+        this.emit({
+          type: "prompt_error",
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      })
+      .finally(() => {
+        this.promptRunning = false;
+        if (this.promptCompletion === completion) this.promptCompletion = null;
+        if (!streamingBehavior) this.emit({ type: "prompt_done" });
+        notifyRunningChange();
+      });
+    this.promptCompletion = completion;
+    return completion;
+  }
+
+  /** Start a browser prompt without blocking its HTTP request.
+   *
+   * @author GPT-5.6 Sol
+   * @version 1.0.0
+   */
+  private startPrompt(command: Record<string, unknown>): null {
+    void this.beginPrompt(command).catch(() => {
+      // Error details are emitted to SSE by beginPrompt().
+    });
+    return null;
+  }
+
+  /** Reject completed worker turns whose final assistant message failed or aborted.
+   *
+   * @author GPT-5.6 Sol
+   * @version 1.0.0
+   */
+  private assertLastAssistantSucceeded(): void {
+    for (let index = this.inner.messages.length - 1; index >= 0; index--) {
+      const message = this.inner.messages[index];
+      if (message.role !== "assistant") continue;
+      if (message.stopReason === "error") throw new Error(message.errorMessage || "Worker model failed");
+      if (message.stopReason === "aborted") throw new Error("Worker prompt was aborted");
+      return;
+    }
+    throw new Error("Worker completed without an assistant response");
+  }
+
+  /** Resolve and apply one model without recursively re-entering command admission.
+   *
+   * @author GPT-5.6 Sol
+   * @version 1.0.0
+   */
+  private async setModel(provider: string, modelId: string): Promise<{ id: string; provider: string }> {
+    let model = this.inner.modelRuntime.getModel(provider, modelId);
+    if (!model) {
+      await this.inner.modelRuntime.refresh({ allowNetwork: false });
+      model = this.inner.modelRuntime.getModel(provider, modelId);
+    }
+    if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
+    await this.inner.setModel(model);
+    invalidateModelsCache();
+    invalidateSessionListCache();
+    return { id: model.id, provider: model.provider };
+  }
+
+  /** Apply one Thinking level while preserving DeepSeek's xhigh compatibility.
+   *
+   * @author GPT-5.6 Sol
+   * @version 1.0.0
+   */
+  private setThinkingLevel(level: string): void {
+    this.inner.setThinkingLevel(level);
+    if (level === "xhigh" && (this.inner.model as { compat?: { thinkingFormat?: string } } | null)?.compat?.thinkingFormat === "deepseek" && this.inner.agent?.state) {
+      this.inner.agent.state.thinkingLevel = "xhigh";
+    }
+    invalidateSessionListCache();
+  }
+
+  /** Reject attempts to change a worker's durable model, Thinking, or tool profile.
+   *
+   * @author GPT-5.6 Sol
+   * @version 1.0.0
+   */
+  private assertOrchestrationSettings(settings: {
+    modelProvider?: string;
+    modelId?: string;
+    thinkingLevel?: string;
+    toolNames?: string[];
+  }): void {
+    const policy = this.orchestrationPolicy;
+    if (!policy) return;
+    if (settings.modelProvider || settings.modelId) {
+      if (
+        !policy.model
+        || settings.modelProvider !== policy.model.provider
+        || settings.modelId !== policy.model.modelId
+      ) {
+        throw new Error("An orchestrated worker's model cannot be changed");
+      }
+    }
+    if (
+      settings.thinkingLevel
+      && settings.thinkingLevel !== "auto"
+      && policy.thinkingLevel
+      && settings.thinkingLevel !== policy.thinkingLevel
+    ) {
+      throw new Error("An orchestrated worker's Thinking level cannot be changed");
+    }
+    if (settings.toolNames) {
+      const requested = [...new Set(settings.toolNames)].sort();
+      const allowed = [...new Set(policy.toolNames)].sort();
+      if (requested.length !== allowed.length || requested.some((name, index) => name !== allowed[index])) {
+        throw new Error("An orchestrated worker's tool profile cannot be changed");
+      }
+    }
+  }
+
+  /** Reapply persisted worker restrictions immediately before every model turn.
+   *
+   * @author GPT-5.6 Sol
+   * @version 1.0.0
+   */
+  private async applyOrchestrationPolicy(): Promise<void> {
+    const policy = this.orchestrationPolicy;
+    if (!policy) return;
+    if (
+      policy.model
+      && (this.inner.model?.provider !== policy.model.provider || this.inner.model?.id !== policy.model.modelId)
+    ) {
+      await this.setModel(policy.model.provider, policy.model.modelId);
+    }
+    if (policy.thinkingLevel && this.inner.agent.state?.thinkingLevel !== policy.thinkingLevel) {
+      this.setThinkingLevel(policy.thinkingLevel);
+    }
+    this.inner.setActiveToolsByName(policy.toolNames);
+    this.setForceEmptySystemPrompt(false);
+  }
+
+  /** Apply an optional model and Thinking configuration before a prompt starts.
+   *
+   * @author GPT-5.6 Sol
+   * @version 1.0.0
+   */
+  private async applyPromptSettings(settings: {
+    modelProvider?: string;
+    modelId?: string;
+    thinkingLevel?: string;
+  }): Promise<void> {
+    if (Boolean(settings.modelProvider) !== Boolean(settings.modelId)) {
+      throw new Error("Prompt has an incomplete model configuration");
+    }
+    this.assertOrchestrationSettings(settings);
+    if (settings.modelProvider && settings.modelId) {
+      await this.setModel(settings.modelProvider, settings.modelId);
+    }
+    if (settings.thinkingLevel && settings.thinkingLevel !== "auto") {
+      this.setThinkingLevel(settings.thinkingLevel);
+    }
+    await this.applyOrchestrationPolicy();
   }
 
   async send(command: Record<string, unknown>): Promise<unknown> {
+    if (!this._alive || this.deletionReserved) throw new Error("Session runtime is closed or being deleted");
     this.resetIdleTimer();
     const type = command.type as string;
     if (this.shouldWaitForExtensions(type)) await this.waitForExtensionsBound();
+    if (!this._alive || this.deletionReserved) {
+      throw new Error("Session runtime was closed or reserved for deletion before the command started");
+    }
 
     if (type === "prompt" || type === "steer" || type === "follow_up") {
       const imageError = validateAgentImages(command.images);
@@ -363,10 +588,18 @@ export class AgentSessionWrapper {
 
     switch (type) {
       case "prompt":
-        if (this.scheduledPromptStarting) {
-          throw new Error("Cannot send a prompt while a scheduled prompt is starting");
+        if (this.isRunning()) {
+          throw new Error("Cannot send a prompt while the session is busy");
         }
-        return this.startPrompt(command);
+        this.scheduledPromptStarting = true;
+        notifyRunningChange();
+        try {
+          await this.applyOrchestrationPolicy();
+          return this.startPrompt(command);
+        } finally {
+          this.scheduledPromptStarting = false;
+          notifyRunningChange();
+        }
 
       case "scheduled_prompt": {
         if (this.isRunning()) {
@@ -378,24 +611,36 @@ export class AgentSessionWrapper {
           modelId?: string;
           thinkingLevel?: string;
         };
-        if (Boolean(settings.modelProvider) !== Boolean(settings.modelId)) {
-          throw new Error("Scheduled prompt has an incomplete model configuration");
-        }
 
         this.scheduledPromptStarting = true;
         notifyRunningChange();
         try {
-          if (settings.modelProvider && settings.modelId) {
-            await this.send({
-              type: "set_model",
-              provider: settings.modelProvider,
-              modelId: settings.modelId,
-            });
-          }
-          if (settings.thinkingLevel && settings.thinkingLevel !== "auto") {
-            await this.send({ type: "set_thinking_level", level: settings.thinkingLevel });
-          }
+          await this.applyPromptSettings(settings);
           return this.startPrompt({ type: "prompt", message: settings.message });
+        } finally {
+          this.scheduledPromptStarting = false;
+          notifyRunningChange();
+        }
+      }
+
+      case "orchestrated_prompt": {
+        if (this.isRunning()) {
+          throw new Error("Cannot prompt an orchestrated session while it is busy");
+        }
+        const settings = command as {
+          message: string;
+          modelProvider?: string;
+          modelId?: string;
+          thinkingLevel?: string;
+        };
+
+        this.scheduledPromptStarting = true;
+        notifyRunningChange();
+        try {
+          await this.applyPromptSettings(settings);
+          await this.beginPrompt({ type: "prompt", message: settings.message });
+          this.assertLastAssistantSucceeded();
+          return { text: this.inner.getLastAssistantText() ?? "" };
         } finally {
           this.scheduledPromptStarting = false;
           notifyRunningChange();
@@ -436,22 +681,18 @@ export class AgentSessionWrapper {
       }
 
       case "set_model": {
+        if (this.isRunning()) throw new Error("Cannot change model while the session is busy");
         const { provider, modelId } = command as { provider: string; modelId: string };
-        let model = this.inner.modelRuntime.getModel(provider, modelId);
-        if (!model) {
-          await this.inner.modelRuntime.refresh({ allowNetwork: false });
-          model = this.inner.modelRuntime.getModel(provider, modelId);
-        }
-        if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
-        await this.inner.setModel(model);
-        invalidateModelsCache();
-        invalidateSessionListCache();
-        return { id: model.id, provider: model.provider };
+        this.assertOrchestrationSettings({ modelProvider: provider, modelId });
+        return this.setModel(provider, modelId);
       }
 
       case "fork": {
-        if (this.inner.isBashRunning) {
-          throw new Error("Cannot fork while a shell command is running");
+        if (this.orchestrationPolicy) {
+          throw new Error("Orchestrated workers cannot be forked through the generic Session API");
+        }
+        if (this.isRunning()) {
+          throw new Error("Cannot fork while the session is busy");
         }
         const entryId = command.entryId as string;
         const sessionManager = this.inner.sessionManager;
@@ -487,27 +728,21 @@ export class AgentSessionWrapper {
       }
 
       case "navigate_tree": {
-        if (this.inner.isBashRunning) {
-          throw new Error("Cannot navigate while a shell command is running");
-        }
+        if (this.isRunning()) throw new Error("Cannot navigate while the session is busy");
         const result = await this.inner.navigateTree(command.targetId as string, {});
         return { cancelled: result.cancelled };
       }
 
       case "set_thinking_level": {
+        if (this.isRunning()) throw new Error("Cannot change Thinking level while the session is busy");
         const level = command.level as string;
-        this.inner.setThinkingLevel(level);
-        // setThinkingLevel clamps xhigh→high for models where supportsXhigh()===false.
-        // If the model has DeepSeek thinking compat (reasoningEffortMap maps xhigh→max),
-        // force the state back so the compat layer can use it correctly.
-        if (level === "xhigh" && (this.inner.model as { compat?: { thinkingFormat?: string } } | null)?.compat?.thinkingFormat === "deepseek" && this.inner.agent?.state) {
-          this.inner.agent.state.thinkingLevel = "xhigh";
-        }
-        invalidateSessionListCache();
+        this.assertOrchestrationSettings({ thinkingLevel: level });
+        this.setThinkingLevel(level);
         return null;
       }
 
       case "compact": {
+        if (this.isRunning()) throw new Error("Cannot compact while the session is busy");
         try {
           return await this.withFinalRunningNotification(() =>
             this.inner.compact(command.customInstructions as string | undefined)
@@ -526,6 +761,7 @@ export class AgentSessionWrapper {
       }
 
       case "persist_session": {
+        if (this.isRunning()) throw new Error("Cannot persist an empty session while it is busy");
         const sessionFile = this.inner.sessionManager.persistSession();
         if (!sessionFile) throw new Error("Session persistence is disabled");
         cacheSessionPath(this.inner.sessionId, sessionFile);
@@ -556,12 +792,18 @@ export class AgentSessionWrapper {
       }
 
       case "steer": {
+        if (this.scheduledPromptStarting) {
+          throw new Error("Cannot steer a scheduled or orchestrated prompt");
+        }
         const steerImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         await this.inner.steer(command.message as string, steerImages?.length ? steerImages : undefined);
         return null;
       }
 
       case "follow_up": {
+        if (this.scheduledPromptStarting) {
+          throw new Error("Cannot queue a follow-up for a scheduled or orchestrated prompt");
+        }
         const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         await this.inner.followUp(command.message as string, followImages?.length ? followImages : undefined);
         return null;
@@ -607,14 +849,35 @@ export class AgentSessionWrapper {
       }
 
       case "set_tools": {
+        if (this.isRunning()) throw new Error("Cannot change tools while the session is busy");
         const toolNames = command.toolNames as string[];
-        this.setForceEmptySystemPrompt(toolNames.length === 0);
-        this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
+        this.assertOrchestrationSettings({ toolNames });
+        if (this.orchestrationPolicy) {
+          this.setForceEmptySystemPrompt(false);
+          this.inner.setActiveToolsByName(this.orchestrationPolicy.toolNames);
+        } else {
+          this.setForceEmptySystemPrompt(toolNames.length === 0);
+          this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
+        }
+        this.applyForcedEmptySystemPrompt();
+        return null;
+      }
+
+      case "set_tools_exact": {
+        if (this.isRunning()) throw new Error("Cannot change tools while the session is busy");
+        const toolNames = command.toolNames as string[];
+        this.assertOrchestrationSettings({ toolNames });
+        const forceEmpty = !this.orchestrationPolicy
+          && toolNames.length === 0
+          && command.preserveSystemPrompt !== true;
+        this.setForceEmptySystemPrompt(forceEmpty);
+        this.inner.setActiveToolsByName(this.orchestrationPolicy?.toolNames ?? toolNames);
         this.applyForcedEmptySystemPrompt();
         return null;
       }
 
       case "reload": {
+        if (this.isRunning()) throw new Error("Cannot reload while the session is busy");
         await this.waitForExtensionsBound();
         this.extensionStatuses.clear();
         this.extensionWidgets.clear();
@@ -623,6 +886,7 @@ export class AgentSessionWrapper {
           this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
         }
         this.applyForcedEmptySystemPrompt();
+        await this.applyOrchestrationPolicy();
         return { success: true };
       }
 
@@ -647,7 +911,16 @@ export class AgentSessionWrapper {
       }
 
       case "bash": {
-        if (this.promptRunning || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning) {
+        if (this.orchestrationPolicy && !this.orchestrationPolicy.toolNames.includes("bash")) {
+          throw new Error("This orchestrated worker's tool profile does not allow shell commands");
+        }
+        if (
+          this.scheduledPromptStarting
+          || this.promptRunning
+          || this.inner.isStreaming
+          || this.inner.isCompacting
+          || this.inner.isBashRunning
+        ) {
           throw new Error("Cannot run a shell command while the session is busy");
         }
         const execution = this.inner.executeBash(
@@ -686,8 +959,20 @@ export class AgentSessionWrapper {
     for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
     this.pendingUiResponses.clear();
     this.pendingUiRequests.clear();
-    this.onDestroyCallback?.();
+    this.destroyCompletion = Promise.resolve(this.onDestroyCallback?.()).catch(() => {
+      // Registry/lease cleanup is best-effort during process shutdown.
+    });
     notifyRunningChange();
+  }
+
+  /** Destroy an idle wrapper and wait for registry/lease cleanup before unlinking its file.
+   *
+   * @author GPT-5.6 Sol
+   * @version 1.0.0
+   */
+  async destroyAndWait(): Promise<void> {
+    this.destroy();
+    await this.destroyCompletion;
   }
 
   private resolveExtensionUiResponse(response: ExtensionUiResponse): void {
@@ -1030,6 +1315,7 @@ export class AgentSessionWrapper {
 declare global {
   var __piSessions: Map<string, AgentSessionWrapper> | undefined;
   var __piStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
+  var __piDeletingSessions: Set<string> | undefined;
   var __piRunningListeners: Set<(ids: string[]) => void> | undefined;
 }
 
@@ -1049,8 +1335,69 @@ function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSes
   return globalThis.__piStartLocks;
 }
 
+function getDeletingSessions(): Set<string> {
+  if (!globalThis.__piDeletingSessions) globalThis.__piDeletingSessions = new Set();
+  return globalThis.__piDeletingSessions;
+}
+
+export interface RpcSessionDeletionReservation {
+  session?: AgentSessionWrapper;
+  release(): void;
+}
+
+/** Reserve one idle Session against concurrent startup and command admission.
+ *
+ * @author GPT-5.6 Sol
+ * @version 1.0.0
+ */
+export function reserveRpcSessionDeletion(sessionId: string): RpcSessionDeletionReservation | undefined {
+  const deleting = getDeletingSessions();
+  if (deleting.has(sessionId) || getLocks().has(sessionId)) return undefined;
+  const session = getRegistry().get(sessionId);
+  if (session?.isAlive() && !session.reserveDeletion()) return undefined;
+  deleting.add(sessionId);
+  let released = false;
+  return {
+    session,
+    release: () => {
+      if (released) return;
+      released = true;
+      deleting.delete(sessionId);
+      session?.releaseDeletionReservation();
+    },
+  };
+}
+
 export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {
   return getRegistry().get(sessionId);
+}
+
+let webSessionOrchestrationHost: WebSessionOrchestrationHost | undefined;
+
+/** Reuse one Pi-Web orchestration adapter over the hot-reload-safe RPC registry.
+ *
+ * @author GPT-5.6 Sol
+ * @version 1.0.0
+ */
+function getWebSessionOrchestrationHost(): WebSessionOrchestrationHost {
+  webSessionOrchestrationHost ??= createWebSessionOrchestrationHost({
+    startSession: async (sessionId, sessionFile, cwd, toolNames, ownerCapability) => {
+      const { session } = await startRpcSession(sessionId, sessionFile, cwd, toolNames, {
+        includeExtensionTools: false,
+        enableSessionOrchestration: false,
+        preserveSystemPromptWithoutTools: true,
+        orchestrationOwnerHostCapability: ORCHESTRATION_OWNER_HOST_CAPABILITY,
+        orchestrationOwnerCapability: ownerCapability,
+      });
+      await session.send({ type: "set_tools_exact", toolNames, preserveSystemPrompt: true });
+      return session;
+    },
+    getSession: (sessionId) => getRpcSession(sessionId),
+    cacheSessionPath,
+    invalidateSessionPath: invalidateSessionPathCache,
+    invalidateSessionList: invalidateSessionListCache,
+  });
+  return webSessionOrchestrationHost;
 }
 
 export function getRunningRpcSessionIds(): string[] {
@@ -1107,74 +1454,161 @@ export async function startRpcSession(
   sessionId: string,
   sessionFile: string,
   cwd: string,
-  toolNames?: string[]
+  toolNames?: string[],
+  options: StartRpcSessionOptions = {},
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
+  if (getDeletingSessions().has(sessionId)) {
+    throw new Error(`Session ${sessionId} is being deleted`);
+  }
 
+  const ownerHostAuthorized = options.orchestrationOwnerHostCapability === ORCHESTRATION_OWNER_HOST_CAPABILITY;
   const existing = registry.get(sessionId);
-  if (existing?.isAlive()) return { session: existing, realSessionId: sessionId };
+  if (existing?.isAlive()) {
+    if (existing.isOrchestratedWorker() && !ownerHostAuthorized) {
+      throw new Error("Orchestrated workers can only be started through their owning controller Session");
+    }
+    return { session: existing, realSessionId: sessionId };
+  }
 
   const inflight = locks.get(sessionId);
-  if (inflight) return inflight;
+  if (inflight) {
+    const result = await inflight;
+    if (result.session.isOrchestratedWorker() && !ownerHostAuthorized) {
+      throw new Error("Orchestrated workers can only be started through their owning controller Session");
+    }
+    return result;
+  }
 
   const starting = (async () => {
     // Some extensions access the SDK's global theme even outside the terminal UI.
     initTheme();
     const agentDir = getAgentDir();
-
     const sessionManager = sessionFile
       ? SessionManager.open(sessionFile, undefined)
       : SessionManager.create(cwd, undefined);
-
-    // Determine which tools to pass based on requested toolNames.
-    // Since v0.68.0, session creation expects string[] tool names instead of Tool[] instances.
-    let toolsOption: string[] | undefined;
-    if (toolNames !== undefined) {
-      // toolNames === [] -> "all off" (an empty allow-list disables every tool).
-      // Otherwise DO NOT pass a builtin-only allow-list: passing CODING_TOOL_NAMES
-      // set allowedToolNames to coding builtins only, which filtered every
-      // extension/package-provided tool (e.g. subagents, web access) out of the
-      // tool registry — so they were unavailable in Pi Web sessions even though the
-      // `pi` CLI keeps them. Leaving the allow-list unset lets the SDK register all
-      // tools (and activate extension tools); we narrow the ACTIVE set below.
-      toolsOption = toolNames.length === 0 ? [] : undefined;
+    const metadata = sessionManager.getHeader()?.orchestration;
+    if (metadata !== undefined && !isSessionOrchestrationMetadata(metadata)) {
+      throw new Error("Orchestrated worker metadata is invalid");
     }
-
-    // Build services first so extension-registered providers are available
-    // before the SDK restores the saved model from the session file.
-    const services = await createAgentSessionServices({ cwd, agentDir });
-    const { session: inner } = await createAgentSessionFromServices({
-      services,
-      sessionManager,
-      ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
-    });
-
-    // If specific tool names were requested (non-empty), set the active tools to the
-    // requested builtin coding tools PLUS all extension/package tools, so installed
-    // extensions stay usable in Pi Web just like in the `pi` CLI.
-    if (toolNames && toolNames.length > 0) {
-      inner.setActiveToolsByName(withExtensionTools(inner, toolNames));
+    const orchestrationPolicy: OrchestratedRuntimePolicy | undefined = isSessionOrchestrationMetadata(metadata)
+      ? {
+          toolNames: getSessionOrchestrationToolNames(metadata.toolProfile),
+          model: metadata.model,
+          thinkingLevel: metadata.thinkingLevel,
+        }
+      : undefined;
+    if (
+      orchestrationPolicy
+      && !ownerHostAuthorized
+    ) {
+      throw new Error("Orchestrated workers can only be started through their owning controller Session");
     }
+    let runtimeLease: OrchestratedSessionRuntimeLease | undefined;
+    let startingWrapper: AgentSessionWrapper | undefined;
 
-    const wrapper = new AgentSessionWrapper(inner);
-    // When all tools are disabled, clear the system prompt entirely.
-    // pi's buildSystemPrompt always produces a non-empty prompt even with no tools;
-    // keep this forced after extension resource discovery and reloads as well.
-    if (toolNames?.length === 0) {
-      wrapper.setForceEmptySystemPrompt(true);
+    try {
+      if (orchestrationPolicy) {
+        runtimeLease = await acquireOrchestratedSessionRuntimeLease(
+          sessionManager,
+          options.orchestrationOwnerCapability,
+        );
+      }
+
+      // Persisted worker policy overrides every browser-provided tool option.
+      const effectiveToolNames = orchestrationPolicy?.toolNames ?? toolNames;
+      const includeExtensionTools = orchestrationPolicy ? false : options.includeExtensionTools !== false;
+      let toolsOption: string[] | undefined;
+      if (effectiveToolNames !== undefined) {
+        toolsOption = effectiveToolNames.length === 0 || !includeExtensionTools ? effectiveToolNames : undefined;
+      }
+
+      // Worker runtimes never regain orchestration or discovered extension tools.
+      const enableSessionOrchestration = !orchestrationPolicy && options.enableSessionOrchestration !== false;
+      const extensionFactories = enableSessionOrchestration
+        ? [{
+            name: "session-orchestration",
+            factory: createSessionOrchestrationExtension(getWebSessionOrchestrationHost()),
+            hidden: true,
+          }]
+        : [];
+      const runtimeCwd = sessionManager.getCwd();
+      const resourceLoaderOptions = orchestrationPolicy
+        ? { extensionsOverride: isolateOrchestratedSessionExtensions }
+        : (extensionFactories.length > 0 ? { extensionFactories } : undefined);
+      const services = await createAgentSessionServices({
+        cwd: runtimeCwd,
+        agentDir,
+        ...(resourceLoaderOptions ? { resourceLoaderOptions } : {}),
+      });
+      const { session: inner } = await createAgentSessionFromServices({
+        services,
+        sessionManager,
+        ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
+        ...(orchestrationPolicy ? { orchestratedWorkerRuntime: runtimeLease } : {}),
+      });
+
+      if (effectiveToolNames && effectiveToolNames.length > 0) {
+        inner.setActiveToolsByName(
+          includeExtensionTools ? withExtensionTools(inner, effectiveToolNames) : effectiveToolNames,
+        );
+      }
+
+      const wrapper = new AgentSessionWrapper(inner, orchestrationPolicy);
+      startingWrapper = wrapper;
+      const forceEmptySystemPrompt = !orchestrationPolicy
+        && effectiveToolNames?.length === 0
+        && !options.preserveSystemPromptWithoutTools;
+      if (forceEmptySystemPrompt) wrapper.setForceEmptySystemPrompt(true);
+      wrapper.start();
+
+      if (orchestrationPolicy?.model) {
+        await wrapper.send({
+          type: "set_model",
+          provider: orchestrationPolicy.model.provider,
+          modelId: orchestrationPolicy.model.modelId,
+        });
+      }
+      if (orchestrationPolicy?.thinkingLevel) {
+        await wrapper.send({ type: "set_thinking_level", level: orchestrationPolicy.thinkingLevel });
+      }
+      if (orchestrationPolicy) {
+        await wrapper.send({
+          type: "set_tools_exact",
+          toolNames: orchestrationPolicy.toolNames,
+          preserveSystemPrompt: true,
+        });
+      }
+
+      const realSessionId = inner.sessionId as string;
+      const realSessionFile = inner.sessionFile as string | undefined;
+      if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
+
+      wrapper.onDestroy(async () => {
+        registry.delete(realSessionId);
+        if (runtimeLease) {
+          const lease = runtimeLease;
+          runtimeLease = undefined;
+          await lease.release().catch(() => {
+            // A stale lease cleanup error must not crash the shared web process.
+          });
+        }
+      });
+      registry.set(realSessionId, wrapper);
+      wrapper.beginExtensionBinding({ forceEmptySystemPrompt });
+      return { session: wrapper, realSessionId };
+    } catch (error) {
+      startingWrapper?.destroy();
+      if (runtimeLease) {
+        try {
+          await runtimeLease.release();
+        } catch {
+          // Preserve the original startup error.
+        }
+      }
+      throw error;
     }
-    wrapper.start();
-
-    const realSessionId = inner.sessionId as string;
-    const realSessionFile = inner.sessionFile as string | undefined;
-    if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
-
-    wrapper.onDestroy(() => registry.delete(realSessionId));
-    registry.set(realSessionId, wrapper);
-    wrapper.beginExtensionBinding({ forceEmptySystemPrompt: toolNames?.length === 0 });
-
-    return { session: wrapper, realSessionId };
   })().finally(() => locks.delete(sessionId));
 
   locks.set(sessionId, starting);

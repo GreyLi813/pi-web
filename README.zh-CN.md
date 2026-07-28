@@ -66,6 +66,8 @@ npx @agegr/pi-web@latest
 
 - **把历史工作接回来**：打开网页就能按项目找到以前的 pi 对话，不必在终端里翻文件或记住会话路径。
 - **放心试不同方向**：可以从某条历史消息重新开始，也可以复制出一条独立的新路线，探索方案时不怕弄乱原来的对话。
+- **编排干净的工作会话**：总控会话可以创建并持续驱动独立持久化会话，适合不受既有结论影响的 Review、Validation 和任务执行。
+- **并行委派任务**：使用有上限的并发工作会话处理独立任务，并可通过 Session ID 继续任一工作会话。
 - **跨分支工作**：在侧边栏切换 Git worktree，让新会话和 Explorer 跟随你选择的 checkout。
 - **边聊边看项目文件**：左侧浏览项目文件，右侧打开源码、文档、图片、音频和 PDF；文件变化会自动刷新，适合边让 agent 改边检查结果。
 - **随时掌握会话状态**：在顶部就能看到上下文占用、花费、压缩结果和系统提示，长会话不再像黑箱。
@@ -79,6 +81,8 @@ npx @agegr/pi-web@latest
 - **文件访问**：文件浏览和预览面向当前选择的项目目录，以及会话中已出现过的工作目录。
 - **Git worktree**：什么时候显示切换器、新建目录在哪里、删除会影响什么，见 [Pi Web 里的 Worktree](./docs/worktrees.zh-CN.md)。
 - **Fork 与会话内分支不同**：Fork 会创建新的 `.jsonl` 文件；“Edit from here” 是同一会话文件里的分支。
+- **编排工作会话不是 Fork**：工作会话从空白消息历史开始，控制关系同时绑定 controller ID 与其精确 JSONL 文件，并在侧边栏中以 worker/delegate 标识。
+- **重新打开仍保持限制**：所属编排 Host 每次冷启动都会重新应用持久化的模型、Thinking 和精确工具配置。worker 保留扩展模型注册，但禁用扩展运行时处理器和工具；直接 CLI/SDK 恢复及一切通用变更/冷启动路径都会被拒绝，但运行中的 worker 可在 UI 中只读观察；进程级租约阻止第二个运行时。取消只清理从未启动的 delegate；删除 worker 需获得跨进程租约，仍拥有 worker 的 controller 不能删除。
 
 ## 开发
 
@@ -129,6 +133,7 @@ lib/
   directory-browser.ts # 目录规范化和安全枚举工具
   http-dispatcher.ts  # 服务端 fetch 的 HTTP(S) 代理配置
   rpc-manager.ts      # AgentSessionWrapper 生命周期和全局 registry
+  session-orchestration-host.ts # 通过共享 registry 驱动干净的工作会话
   session-reader.ts   # 解析 .jsonl 会话文件和分支上下文
   normalize.ts        # 规范化 toolCall 字段名
   file-access.ts      # 文件读取安全边界

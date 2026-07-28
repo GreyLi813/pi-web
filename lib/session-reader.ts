@@ -40,6 +40,7 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       messageCount: s.messageCount,
       firstMessage: s.firstMessage || "(no messages)",
       parentSessionId: s.parentSessionPath ? pathToId.get(sessionPathKey(s.parentSessionPath)) : undefined,
+      orchestration: s.orchestration,
       projectRoot: project?.projectRoot ?? s.cwd,
       ...(project?.isWorktree && project.branch ? { worktreeBranch: project.branch } : {}),
     };

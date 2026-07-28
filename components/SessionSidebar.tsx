@@ -196,13 +196,16 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
     byId.set(s.id, { session: s, children: [] });
   }
 
-  // Build a map of parentSessionId chains so we can resolve missing ancestors
+  // Forks and orchestrated workers are separate persistence concepts, but both
+  // benefit from a controller hierarchy in the sidebar. Orchestration metadata
+  // never changes the worker's clean model context.
   const parentOf = new Map<string, string>();
   for (const s of sessions) {
-    if (s.parentSessionId) parentOf.set(s.id, s.parentSessionId);
+    const controllerId = s.parentSessionId ?? s.orchestration?.ownerSessionId;
+    if (controllerId) parentOf.set(s.id, controllerId);
   }
 
-  // Walk up the parentSessionId chain to find the nearest ancestor that exists in byId
+  // Walk up the display relationship to find the nearest visible ancestor.
   function resolveAncestor(id: string): string | null {
     let cur = parentOf.get(id);
     const visited = new Set<string>();
@@ -440,7 +443,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         return next;
       });
     }
-    if (completedInBackground.length > 0) {
+    if (completedInBackground.length > 0 || newlyRunning.length > 0) {
       loadSessions(false);
     }
 
@@ -1834,15 +1837,24 @@ function SessionItem({
       ) : (
         /* ── Normal view ── */
         <>
-          {/* Fork indicator for child sessions */}
-          {depth > 0 && (
+          {/* Distinguish clean orchestrated workers from history-derived forks. */}
+          {depth > 0 && (session.orchestration ? (
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <title>Independent orchestrated session</title>
+              <circle cx="6" cy="12" r="3" />
+              <circle cx="18" cy="12" r="3" />
+              <path d="M9 12h6" />
+              <path d="m13 9 3 3-3 3" />
+            </svg>
+          ) : (
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <title>Forked session</title>
               <line x1="6" y1="3" x2="6" y2="15" />
               <circle cx="18" cy="6" r="3" />
               <circle cx="6" cy="18" r="3" />
               <path d="M18 9a9 9 0 0 1-9 9" />
             </svg>
-          )}
+          ))}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div
               style={{
@@ -1870,6 +1882,11 @@ function SessionItem({
                 <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
               )}
               <span>{session.messageCount} msgs</span>
+              {session.orchestration && (
+                <span title={`Independent ${session.orchestration.kind} session · ${session.orchestration.toolProfile}`} style={{ color: "var(--accent)" }}>
+                  {session.orchestration.kind === "delegate" ? "delegate" : "worker"}
+                </span>
+              )}
               {session.worktreeBranch && (
                 <span
                   title={`Worktree: ${session.cwd}`}
@@ -1891,7 +1908,7 @@ function SessionItem({
           {hasChildren && (
             <button
               onClick={(e) => { e.stopPropagation(); onToggleCollapse?.(); }}
-              title={collapsed ? "Expand forks" : "Collapse forks"}
+              title={collapsed ? "Expand related sessions" : "Collapse related sessions"}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
                 width: 20, height: 20, padding: 0, flexShrink: 0,

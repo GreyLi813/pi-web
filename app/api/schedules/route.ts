@@ -13,9 +13,9 @@
 
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { dirname, join } from "path";
-import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
-import { resolveSessionPath } from "@/lib/session-reader";
+import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
 import {
   dispatchScheduleToAgent,
   getDueSchedules,
@@ -110,6 +110,19 @@ async function withScheduleStoreLock<T>(operation: () => Promise<T>): Promise<T>
   }
 }
 
+/** Validate that a durable schedule target exists and is a controller Session.
+ * @author GPT-5.6 Sol
+ * @version 1.0.0
+ */
+async function validateScheduleTarget(sessionId: string): Promise<string | undefined> {
+  const filePath = await resolveSessionPath(sessionId);
+  if (!filePath) return `Session '${sessionId}' not found`;
+  if (readSessionHeader(filePath)?.orchestration !== undefined) {
+    return "Orchestrated worker sessions cannot own schedules";
+  }
+  return undefined;
+}
+
 /** Return a validation error when only half of a model selection is provided. */
 function validateModelSelection(modelProvider: string | undefined, modelId: string | undefined): string | null {
   if (Boolean(modelProvider?.trim()) !== Boolean(modelId?.trim())) {
@@ -141,11 +154,28 @@ async function dispatchDueSchedule(): Promise<Response> {
       for (const schedule of dueSchedules) {
         const sessionId = schedule.sessionId;
         if (!sessionId) continue;
+        const filePath = await resolveSessionPath(sessionId);
+        if (!filePath) {
+          const stored = store.schedules.find((entry) => entry.id === schedule.id);
+          if (stored?.enabled) {
+            stored.enabled = false;
+            await writeStore(store);
+          }
+          continue;
+        }
+        const header = readSessionHeader(filePath);
+        if (header?.orchestration !== undefined) {
+          const stored = store.schedules.find((entry) => entry.id === schedule.id);
+          if (stored?.enabled) {
+            stored.enabled = false;
+            await writeStore(store);
+          }
+          continue;
+        }
+
         let agent = getRpcSession(sessionId);
         if (!agent?.isAlive()) {
-          const filePath = await resolveSessionPath(sessionId);
-          if (!filePath) continue;
-          const cwd = SessionManager.open(filePath).getHeader()?.cwd ?? process.cwd();
+          const cwd = header?.cwd ?? process.cwd();
           ({ session: agent } = await startRpcSession(sessionId, filePath, cwd));
         }
 
@@ -224,6 +254,14 @@ export async function POST(req: Request): Promise<Response> {
         }
 
         if (body.action === "resume") {
+          const targetError = schedule.sessionId
+            ? await validateScheduleTarget(schedule.sessionId)
+            : "Schedule has no bound Session";
+          if (targetError) {
+            schedule.enabled = false;
+            await writeStore(store);
+            return Response.json({ error: targetError }, { status: 409 });
+          }
           if (!schedule.enabled) {
             schedule.enabled = true;
             schedule.nextFireAt = Date.now() + schedule.intervalSeconds * 1000;
@@ -288,6 +326,8 @@ export async function POST(req: Request): Promise<Response> {
             return Response.json({ error: "A schedule's session binding cannot be changed" }, { status: 409 });
           }
           if (!schedule.sessionId) {
+            const targetError = await validateScheduleTarget(requestedSessionId);
+            if (targetError) return Response.json({ error: targetError }, { status: 400 });
             schedule.sessionId = requestedSessionId;
             await writeStore(store);
           }
@@ -309,6 +349,8 @@ export async function POST(req: Request): Promise<Response> {
 
       const modelError = validateModelSelection(body.modelProvider, body.modelId);
       if (modelError) return Response.json({ error: modelError }, { status: 400 });
+      const targetError = await validateScheduleTarget(body.sessionId.trim());
+      if (targetError) return Response.json({ error: targetError }, { status: 400 });
       if (store.schedules.length >= 50) {
         return Response.json({ error: "Maximum of 50 schedules reached" }, { status: 400 });
       }

@@ -1,5 +1,16 @@
 // Types mirrored from pi-mono coding-agent session-manager
 
+export interface SessionOrchestrationMetadata {
+  version: 1;
+  ownerSessionId: string;
+  ownerSessionFile: string;
+  kind: "session" | "delegate";
+  depth: number;
+  toolProfile: "coding" | "read-only" | "none";
+  model?: { provider: string; modelId: string };
+  thinkingLevel?: string;
+}
+
 export interface SessionHeader {
   type: "session";
   version?: number;
@@ -7,6 +18,7 @@ export interface SessionHeader {
   timestamp: string;
   cwd: string;
   parentSession?: string;
+  orchestration?: SessionOrchestrationMetadata;
 }
 
 export interface SessionEntryBase {
@@ -292,6 +304,7 @@ export interface SessionInfo {
   messageCount: number;
   firstMessage: string;
   parentSessionId?: string; // set if this session was forked from another
+  orchestration?: SessionOrchestrationMetadata;
   /** Main repo root shared by all worktrees of this cwd (cwd itself for non-git dirs).
    *  Always set by the server; optional because the client builds transient
    *  SessionInfo objects before the first refresh. Fall back to cwd. */

@@ -70,6 +70,18 @@ test("fails safely: a busy session receives no schedule commands", async () => {
   assert.deepEqual(commands, []);
 });
 
+test("fails safely: orchestrated workers receive no schedule commands", async () => {
+  const commands: Array<Record<string, unknown>> = [];
+  const accepted = await dispatchScheduleToAgent(baseSchedule, {
+    isRunning: () => false,
+    isOrchestratedWorker: () => true,
+    send: async (command) => { commands.push(command); },
+  });
+
+  assert.equal(accepted, false);
+  assert.deepEqual(commands, []);
+});
+
 test("fails safely: incomplete model settings reject before prompting", async () => {
   const commands: Array<Record<string, unknown>> = [];
   await assert.rejects(

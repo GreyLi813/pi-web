@@ -11,14 +11,21 @@ export async function GET(
 ) {
   const { id } = await params;
 
-  // Fast path: already-running session
+  // Fast path: attach to a live session. Live workers are observable read-only.
   let session = getRpcSession(id);
   if (!session || !session.isAlive()) {
     const filePath = await resolveSessionPath(id);
     if (!filePath) {
       return new Response("Session not found", { status: 404 });
     }
-    const cwd = SessionManager.open(filePath).getHeader()?.cwd ?? process.cwd();
+    const header = SessionManager.open(filePath).getHeader();
+    if (header?.orchestration !== undefined) {
+      // Never cold-start a worker through the generic SSE route.
+      return new Response("Idle orchestrated workers can only be started through their owning controller Session", {
+        status: 403,
+      });
+    }
+    const cwd = header?.cwd ?? process.cwd();
     try {
       ({ session } = await startRpcSession(id, filePath, cwd));
     } catch (error) {

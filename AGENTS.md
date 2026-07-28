@@ -75,6 +75,7 @@ lib/
   pi-types.ts          local structural types for pi SDK objects
   rpc-manager.ts      AgentSessionWrapper + registry + startRpcSession
   session-reader.ts   SessionManager wrappers + path cache + buildSessionContext adapter
+  session-orchestration-host.ts Clean persisted worker routing through the shared RPC registry
   tool-presets.ts     PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   types.ts            shared TypeScript types
   normalize.ts        normalizeToolCalls() — field name mismatch between file format and our types
@@ -119,9 +120,12 @@ hooks/
 
 **Fix**: `send("fork")` captures `newSessionId`, then calls `this.destroy()` before returning. The next request for the original session reloads a clean AgentSession from the original file.
 
-### Two kinds of branching — don't confuse them
-- **Fork** (Fork button on user message): creates a new independent `.jsonl` file. Shown as a child in the sidebar tree via `parentSession` header field.
-- **In-session branch** (Continue button / BranchNavigator): calls `navigate_tree` within the same file. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=`.
+### Three independent session relationships — don't confuse them
+- **Fork** (Fork button on user message): creates a new `.jsonl` derived from earlier history. Shown via `parentSession`.
+- **In-session branch** (Continue button / BranchNavigator): calls `navigate_tree` within the same file. Multiple entries share the same `parentId`.
+- **Orchestrated worker**: creates a clean persisted `.jsonl` with no copied messages and no `parentSession`. Its header binds ownership to both controller ID and exact controller file; the sidebar relationship is display-only.
+
+Worker prompts must use the existing RPC registry. A process-lifetime `proper-lockfile` lease rejects duplicate runtimes, while an opaque capability minted from the live persisted owner prevents generic SDK lease acquisition. `orchestrated_prompt` applies model/Thinking/prompt atomically and waits for completion. Generic CLI/SDK startup and every worker mutation path (Agent POST, auto-name, rename, Schedule) must reject workers; generic routes must never cold-start a worker. Read-only observation of an already-live worker through `GET /api/agent/[id]`, `GET /api/sessions/[id]/state`, and the per-worker SSE is allowed because its JSONL is already browsable in this local UI. Persisted worker model, Thinking, and exact tool policy override startup options. Worker resource loading preserves provider registrations but removes extension runtime handlers/tools/commands. Restricted workers use `set_tools_exact`. Never destroy or unlink a running/starting Session: reserve the ID locally, await idle wrapper cleanup, and acquire the cross-process deletion lease. Controller deletion and worker creation share the owner lock; a controller with workers cannot be deleted. Cancellation cleanup may unlink only an empty worker while holding owner, worker, and deletion locks.
 
 ### Session files can be fully rewritten
 `parentSession` in the header is **display metadata only** — has zero effect on chat content. Safe to `writeFileSync` the entire file (pi does this itself during migrations). Used when cascade-reparenting children on delete.
@@ -182,6 +186,7 @@ Location: `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
 
 ```jsonl
 {"type":"session","version":3,"id":"<uuid>","timestamp":"...","cwd":"/path","parentSession":"/abs/path/to/parent.jsonl"}
+{"type":"session","version":3,"id":"<worker-uuid>","timestamp":"...","cwd":"/path","orchestration":{"version":1,"ownerSessionId":"<controller-uuid>","ownerSessionFile":"/path/to/controller.jsonl","kind":"session","depth":1,"toolProfile":"read-only"}}
 {"type":"model_change","id":"<8hex>","parentId":null,"provider":"zenmux","modelId":"claude-sonnet-4-6","timestamp":"..."}
 {"type":"message","id":"<8hex>","parentId":"<8hex>","message":{"role":"user","content":"..."}}
 {"type":"message","id":"<8hex>","parentId":"<8hex>","message":{"role":"assistant","content":[...],...}}

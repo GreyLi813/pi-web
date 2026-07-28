@@ -36,6 +36,7 @@
     "start:lan": "next start -H 0.0.0.0 -p 30141",
     "lint": "eslint .",
     "test:runtime": "node --test scripts/test-runtime.test.mjs",
+    "test:orchestration": "node scripts/session-orchestration-e2e.mjs",
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public"
   },
   "dependencies": {

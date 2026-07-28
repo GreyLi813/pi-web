@@ -3,7 +3,7 @@ import { access, copyFile, cp, mkdir, readFile, rm, symlink, writeFile } from "n
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
-export const TEST_WEB_PORT = "30142";
+export const TEST_WEB_PORT = process.env.PI_WEB_TEST_PORT ?? "30142";
 
 const LOCAL_PACKAGES = [
   ["pi-ai", "ai"],

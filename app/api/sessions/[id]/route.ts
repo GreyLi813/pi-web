@@ -1,17 +1,23 @@
 import { NextResponse } from "next/server";
 import { readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import {
+  acquireOrchestratedSessionDeletionLease,
+  isSessionOrchestrationMetadata,
+  listOwnedOrchestratedSessions,
+  type OrchestratedSessionDeletionLease,
+  SessionManager,
+  withSessionOrchestrationOwnerLock,
+} from "@earendil-works/pi-coding-agent";
 import {
   resolveSessionPath,
   resolveSessionIdByPath,
   invalidateSessionPathCache,
   invalidateSessionListCache,
   buildSessionContext,
-  readSessionHeader,
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
-import { getRpcSession } from "@/lib/rpc-manager";
+import { reserveRpcSessionDeletion } from "@/lib/rpc-manager";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -155,6 +161,7 @@ export async function GET(
           })()
         : "(no messages)",
       parentSessionId,
+      orchestration: header.orchestration,
     } : null;
 
     return NextResponse.json({
@@ -186,6 +193,12 @@ export async function PATCH(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
     const sm = SessionManager.open(filePath);
+    if (sm.getHeader()?.orchestration !== undefined) {
+      return NextResponse.json(
+        { error: "Orchestrated workers can only be changed through their owning controller Session" },
+        { status: 403 },
+      );
+    }
     sm.appendSessionInfo(name.trim());
     invalidateSessionListCache();
     return NextResponse.json({ ok: true });
@@ -200,49 +213,108 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const deletion = reserveRpcSessionDeletion(id);
+  if (!deletion) {
+    return NextResponse.json(
+      { error: "Cannot delete a running, starting, or already deleting session" },
+      { status: 409 },
+    );
+  }
+  let deletionLease: OrchestratedSessionDeletionLease | undefined;
   try {
     const filePath = await resolveSessionPath(id);
     if (!filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    // Read only the bounded header before deleting.
-    const parentSessionPath = readSessionHeader(filePath)?.parentSession;
+    const manager = SessionManager.open(filePath);
+    return await withSessionOrchestrationOwnerLock(
+      {
+        sessionId: manager.getSessionId(),
+        sessionFile: filePath,
+        sessionDir: manager.getSessionDir(),
+        cwd: manager.getCwd(),
+        projectTrusted: true,
+      },
+      async () => {
+        const ownedWorkers = await listOwnedOrchestratedSessions({
+          sessionId: manager.getSessionId(),
+          sessionFile: filePath,
+          sessionDir: manager.getSessionDir(),
+          cwd: manager.getCwd(),
+          projectTrusted: true,
+        });
+        if (ownedWorkers.length > 0) {
+          return NextResponse.json(
+            { error: "Delete this controller's owned worker Sessions first" },
+            { status: 409 },
+          );
+        }
 
-    // Re-attach all direct children to this session's parent (cascade re-parent)
-    // Scan sibling files in the same directory
-    const targetPathKey = sessionPathKey(filePath);
-    const dir = dirname(filePath);
-    try {
-      const files = readdirSync(dir).filter(
-        (file) => file.endsWith(".jsonl") && sessionPathKey(join(dir, file)) !== targetPathKey,
-      );
-      for (const file of files) {
-        const childPath = join(dir, file);
-        try {
-          const content = readFileSync(childPath, "utf8");
-          const lines = content.split("\n");
-          const header = JSON.parse(lines[0]) as { type?: string; parentSession?: string };
-          if (
-            header.type === "session" &&
-            header.parentSession &&
-            sessionPathKey(header.parentSession) === targetPathKey
-          ) {
-            // Rewrite header with new parentSession
-            header.parentSession = parentSessionPath;
-            lines[0] = JSON.stringify(header);
-            writeFileSync(childPath, lines.join("\n"));
+        await deletion.session?.destroyAndWait();
+        const header = manager.getHeader();
+        if (header?.orchestration !== undefined) {
+          if (!isSessionOrchestrationMetadata(header.orchestration)) {
+            return NextResponse.json({ error: "Orchestrated worker metadata is invalid" }, { status: 400 });
           }
-        } catch { /* skip malformed */ }
-      }
-    } catch { /* skip if dir unreadable */ }
+          try {
+            deletionLease = await acquireOrchestratedSessionDeletionLease(manager);
+          } catch (error) {
+            if (String(error).includes("active in another process")) {
+              return NextResponse.json(
+                { error: "Cannot delete a worker active in another process" },
+                { status: 409 },
+              );
+            }
+            throw error;
+          }
+        }
+        const parentSessionPath = header?.parentSession;
 
-    getRpcSession(id)?.destroy();
-    unlinkSync(filePath);
-    invalidateSessionPathCache(id);
-    invalidateSessionListCache();
-    return NextResponse.json({ ok: true });
+        // Re-attach all direct children to this session's parent (cascade re-parent)
+        // Scan sibling files in the same directory
+        const targetPathKey = sessionPathKey(filePath);
+        const dir = dirname(filePath);
+        try {
+          const files = readdirSync(dir).filter(
+            (file) => file.endsWith(".jsonl") && sessionPathKey(join(dir, file)) !== targetPathKey,
+          );
+          for (const file of files) {
+            const childPath = join(dir, file);
+            try {
+              const content = readFileSync(childPath, "utf8");
+              const lines = content.split("\n");
+              const header = JSON.parse(lines[0]) as { type?: string; parentSession?: string };
+              if (
+                header.type === "session" &&
+                header.parentSession &&
+                sessionPathKey(header.parentSession) === targetPathKey
+              ) {
+                // Rewrite header with new parentSession
+                header.parentSession = parentSessionPath;
+                lines[0] = JSON.stringify(header);
+                writeFileSync(childPath, lines.join("\n"));
+              }
+            } catch { /* skip malformed */ }
+          }
+        } catch { /* skip if dir unreadable */ }
+
+        unlinkSync(filePath);
+        invalidateSessionPathCache(id);
+        invalidateSessionListCache();
+        return NextResponse.json({ ok: true });
+      },
+    );
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
+  } finally {
+    if (deletionLease) {
+      try {
+        await deletionLease.release();
+      } catch {
+        // The Session file already has a definitive deletion outcome.
+      }
+    }
+    deletion.release();
   }
 }

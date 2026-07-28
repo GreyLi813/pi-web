@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
   AgentSessionEvent,
   SessionManager,
@@ -121,6 +122,7 @@ export interface AgentSessionLike {
   readonly autoCompactionEnabled: boolean;
   readonly autoRetryEnabled: boolean;
   readonly model: ModelLike | undefined;
+  readonly messages: AgentMessage[];
   readonly modelRuntime: {
     getModel: (provider: string, modelId: string) => ModelLike | undefined;
     refresh: (options?: { allowNetwork?: boolean }) => Promise<unknown>;

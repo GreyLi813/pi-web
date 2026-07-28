@@ -16,7 +16,14 @@ export async function POST(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const cwd = SessionManager.open(filePath).getHeader()?.cwd ?? process.cwd();
+    const header = SessionManager.open(filePath).getHeader();
+    if (header?.orchestration !== undefined) {
+      return NextResponse.json(
+        { error: "Orchestrated workers can only be changed through their owning controller Session" },
+        { status: 403 },
+      );
+    }
+    const cwd = header?.cwd ?? process.cwd();
     const existing = getRpcSession(id);
     const { session } = existing?.isAlive()
       ? { session: existing }

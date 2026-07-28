@@ -3,6 +3,17 @@ import { resolveSessionPath } from "@/lib/session-reader";
 import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
+/** Reject generic routes that would bypass durable controller ownership.
+ * @author GPT-5.6 Sol
+ * @version 1.0.0
+ */
+function workerRouteRejection(): NextResponse {
+  return NextResponse.json(
+    { error: "Orchestrated workers can only be accessed through their owning controller Session" },
+    { status: 403 },
+  );
+}
+
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
   req: Request,
@@ -16,6 +27,7 @@ export async function POST(
     // Fast path: already-running session
     const existing = getRpcSession(id);
     if (existing?.isAlive()) {
+      if (existing.isOrchestratedWorker()) return workerRouteRejection();
       const result = await existing.send(body);
       return NextResponse.json({ success: true, data: result });
     }
@@ -25,7 +37,10 @@ export async function POST(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const cwd = SessionManager.open(filePath).getHeader()?.cwd ?? process.cwd();
+    const manager = SessionManager.open(filePath);
+    const header = manager.getHeader();
+    if (header?.orchestration !== undefined) return workerRouteRejection();
+    const cwd = header?.cwd ?? process.cwd();
 
     const { session } = await startRpcSession(id, filePath, cwd);
     const result = await session.send(body);
@@ -49,6 +64,8 @@ export async function GET(
       return NextResponse.json({ running: false });
     }
 
+    // Read-only observation of a live worker is allowed: its JSONL is already
+    // browsable in this local UI. Only mutation/startup paths stay forbidden.
     const state = await session.send({ type: "get_state" });
     return NextResponse.json({ running: true, state });
   } catch (error) {
