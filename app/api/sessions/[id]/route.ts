@@ -17,7 +17,7 @@ import {
   buildSessionContext,
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
-import { reserveRpcSessionDeletion } from "@/lib/rpc-manager";
+import { getRpcSession, reserveRpcSessionDeletion } from "@/lib/rpc-manager";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -251,6 +251,7 @@ export async function DELETE(
           );
         }
 
+        await getRpcSession(id)?.shutdown();
         await deletion.session?.destroyAndWait();
         const header = manager.getHeader();
         if (header?.orchestration !== undefined) {

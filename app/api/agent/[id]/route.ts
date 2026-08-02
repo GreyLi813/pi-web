@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { resolveSessionPath } from "@/lib/session-reader";
 import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 /** Reject generic routes that would bypass durable controller ownership.
  * @author GPT-5.6 Sol
@@ -37,12 +36,15 @@ export async function POST(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const manager = SessionManager.open(filePath);
-    const header = manager.getHeader();
-    if (header?.orchestration !== undefined) return workerRouteRejection();
-    const cwd = header?.cwd ?? process.cwd();
-
-    const { session } = await startRpcSession(id, filePath, cwd);
+    let session;
+    try {
+      ({ session } = await startRpcSession(id, filePath, undefined));
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("owning controller Session")) {
+        return workerRouteRejection();
+      }
+      throw error;
+    }
     const result = await session.send(body);
 
     return NextResponse.json({ success: true, data: result });

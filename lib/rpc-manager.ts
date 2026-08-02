@@ -1,3 +1,4 @@
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
   acquireOrchestratedSessionRuntimeLease,
   createAgentSessionFromServices,
@@ -19,8 +20,10 @@ import { existsSync, realpathSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
+import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import { cacheSessionPath, invalidateSessionListCache, invalidateSessionPathCache } from "./session-reader";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
+import { persistExplicitStartupPreferences } from "./startup-preferences";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
@@ -80,9 +83,29 @@ type ExtensionBindingOptions = {
   forceEmptySystemPrompt?: boolean;
 };
 
+const RUNNING_STATE_EVENT_TYPES = new Set([
+  "agent_start",
+  "agent_end",
+  "agent_settled",
+  "auto_compaction_start",
+  "auto_compaction_end",
+  "compaction_start",
+  "compaction_end",
+]);
+
+const IDLE_RESET_EVENT_TYPES = new Set([
+  "agent_end",
+  "agent_settled",
+  "auto_compaction_end",
+  "compaction_end",
+]);
+
 const ORCHESTRATION_OWNER_HOST_CAPABILITY = Symbol("orchestration-owner-host");
 
 export interface StartRpcSessionOptions {
+  toolNames?: string[];
+  initialModel?: { provider: string; modelId: string };
+  thinkingLevel?: ThinkingLevel;
   includeExtensionTools?: boolean;
   enableSessionOrchestration?: boolean;
   preserveSystemPromptWithoutTools?: boolean;
@@ -105,7 +128,7 @@ class PlainTextTheme extends Theme {
   constructor() {
     super(
       { thinkingXhigh: "" } as ConstructorParameters<typeof Theme>[0],
-      {} as ConstructorParameters<typeof Theme>[1],
+      { selectedBg: "" } as ConstructorParameters<typeof Theme>[1],
       "truecolor",
     );
   }
@@ -164,6 +187,7 @@ export class AgentSessionWrapper {
   private onDestroyCallback: (() => void | Promise<void>) | null = null;
   private destroyCompletion: Promise<void> | null = null;
   private deletionReserved = false;
+  private shutdownPromise: Promise<void> | null = null;
   private _alive = true;
 
   constructor(
@@ -229,14 +253,12 @@ export class AgentSessionWrapper {
 
   start(): void {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
-      this.resetIdleTimer();
       if (event.type === "agent_end") {
         invalidateSessionListCache();
       }
+      if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
       this.emit(event);
-      // Streaming / compaction / tool events flow through here; re-broadcast
-      // the running-status snapshot so the sidebar can update live.
-      notifyRunningChange();
+      if (RUNNING_STATE_EVENT_TYPES.has(event.type)) notifyRunningChange();
     });
     this.resetIdleTimer();
     notifyRunningChange();
@@ -351,6 +373,7 @@ export class AgentSessionWrapper {
     try {
       return await operation();
     } finally {
+      this.resetIdleTimer();
       notifyRunningChange();
     }
   }
@@ -374,7 +397,9 @@ export class AgentSessionWrapper {
         this.resetIdleTimer();
         return;
       }
-      this.destroy();
+      void this.shutdown().catch((error) => {
+        console.error("[pi-web] failed to shut down idle session:", error instanceof Error ? error.message : error);
+      });
     }, 10 * 60 * 1000);
   }
 
@@ -750,7 +775,7 @@ export class AgentSessionWrapper {
         const newSessionId = SessionManager.open(newSessionFile, sessionDir).getSessionId();
         cacheSessionPath(newSessionId, newSessionFile);
         invalidateSessionListCache();
-        this.destroy();
+        await this.shutdown();
         return { cancelled: false, newSessionId };
       }
 
@@ -915,6 +940,7 @@ export class AgentSessionWrapper {
         }
         this.applyStartupExactTools();
         this.applyForcedEmptySystemPrompt();
+        invalidateModelsCache();
         await this.applyOrchestrationPolicy();
         return { success: true };
       }
@@ -963,6 +989,7 @@ export class AgentSessionWrapper {
           this.persistBashOnlySession();
           return result;
         } finally {
+          this.resetIdleTimer();
           invalidateSessionListCache();
           notifyRunningChange();
         }
@@ -988,10 +1015,36 @@ export class AgentSessionWrapper {
     for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
     this.pendingUiResponses.clear();
     this.pendingUiRequests.clear();
-    this.destroyCompletion = Promise.resolve(this.onDestroyCallback?.()).catch(() => {
-      // Registry/lease cleanup is best-effort during process shutdown.
-    });
-    notifyRunningChange();
+    try {
+      this.inner.dispose?.();
+    } finally {
+      this.destroyCompletion = Promise.resolve(this.onDestroyCallback?.()).catch(() => {
+        // Registry/lease cleanup is best-effort during process shutdown.
+      });
+      notifyRunningChange();
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    if (!this._alive) return;
+
+    this.shutdownPromise = (async () => {
+      try {
+        try {
+          await this.waitForExtensionsBound();
+        } catch (error) {
+          console.error(
+            "[pi-web] extension binding failed before session shutdown:",
+            error instanceof Error ? error.message : error,
+          );
+        }
+        await this.inner.extensionRunner.emit?.({ type: "session_shutdown", reason: "quit" });
+      } finally {
+        this.destroy();
+      }
+    })();
+    return this.shutdownPromise;
   }
 
   /** Destroy an idle wrapper and wait for registry/lease cleanup before unlinking its file.
@@ -1444,7 +1497,8 @@ let webSessionOrchestrationHost: WebSessionOrchestrationHost | undefined;
 function getWebSessionOrchestrationHost(): WebSessionOrchestrationHost {
   webSessionOrchestrationHost ??= createWebSessionOrchestrationHost({
     startSession: async (sessionId, sessionFile, cwd, toolNames, ownerCapability) => {
-      const { session } = await startRpcSession(sessionId, sessionFile, cwd, toolNames, {
+      const { session } = await startRpcSession(sessionId, sessionFile, cwd, {
+        toolNames,
         includeExtensionTools: false,
         enableSessionOrchestration: false,
         preserveSystemPromptWithoutTools: true,
@@ -1470,12 +1524,12 @@ export function hasBusyRpcSessionForCwd(cwd: string): boolean {
   );
 }
 
-export function destroyRpcSessionsForCwd(cwd: string): number {
+export async function destroyRpcSessionsForCwd(cwd: string): Promise<number> {
   const targetCwd = normalizeRpcCwd(cwd);
   const sessions = Array.from(getRegistry().values()).filter(
     (session) => normalizeRpcCwd(session.cwd) === targetCwd,
   );
-  for (const session of sessions) session.destroy();
+  await Promise.all(sessions.map((session) => session.shutdown()));
   return sessions.length;
 }
 
@@ -1512,14 +1566,21 @@ let lastRunningSnapshot = "";
 
 /**
  * Recompute the running-session-id set and, if it changed since the last
- * notification, broadcast it to subscribers. Cheap to call often.
+ * notification, broadcast it to subscribers.
  */
 export function notifyRunningChange(): void {
+  const listeners = getRunningListeners();
+  if (listeners.size === 0) {
+    // A future subscriber receives its own initial snapshot. Clear this one so
+    // its first state transition cannot match stale state from an old listener.
+    lastRunningSnapshot = "";
+    return;
+  }
   const ids = getRunningRpcSessionIds();
   const snapshot = JSON.stringify([...ids].sort());
   if (snapshot === lastRunningSnapshot) return;
   lastRunningSnapshot = snapshot;
-  for (const listener of getRunningListeners()) {
+  for (const listener of listeners) {
     try { listener(ids); } catch { /* ignore listener errors */ }
   }
 }
@@ -1527,15 +1588,17 @@ export function notifyRunningChange(): void {
 /**
  * Get or create an AgentSession for the given session.
  * For new sessions (sessionFile === ""), pi generates its own id.
- * Pass toolNames to pre-configure active tools (empty array = all tools disabled).
+ * New sessions resolve enabledModels before construction so the initial model,
+ * thinking pin, and SDK scopedModels share one settings snapshot.
+ * Pass options.toolNames to pre-configure active tools (empty = all disabled).
  */
 export async function startRpcSession(
   sessionId: string,
   sessionFile: string,
-  cwd: string,
-  toolNames?: string[],
+  cwd: string | undefined,
   options: StartRpcSessionOptions = {},
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
+  const { toolNames, initialModel, thinkingLevel } = options;
   const registry = getRegistry();
   const locks = getLocks();
   if (getDeletingSessions().has(sessionId)) {
@@ -1560,14 +1623,19 @@ export async function startRpcSession(
     return result;
   }
 
-  const finishStartingSession = trackStartingSession(cwd);
+  let sessionManager: SessionManager;
+  if (sessionFile) {
+    sessionManager = SessionManager.open(sessionFile, undefined);
+  } else {
+    if (!cwd) throw new Error("cwd is required for a new session");
+    sessionManager = SessionManager.create(cwd, undefined);
+  }
+  const sessionCwd = sessionManager.getCwd();
+  const finishStartingSession = trackStartingSession(sessionCwd);
   const starting = (async () => {
     // Some extensions access the SDK's global theme even outside the terminal UI.
     initTheme();
     const agentDir = getAgentDir();
-    const sessionManager = sessionFile
-      ? SessionManager.open(sessionFile, undefined)
-      : SessionManager.create(cwd, undefined);
     const metadata = sessionManager.getHeader()?.orchestration;
     if (metadata !== undefined && !isSessionOrchestrationMetadata(metadata)) {
       throw new Error("Orchestrated worker metadata is invalid");
@@ -1602,8 +1670,17 @@ export async function startRpcSession(
       // Persisted worker policy overrides every browser-provided tool option.
       const effectiveToolNames = orchestrationPolicy?.toolNames ?? (codexImportPolicy ? undefined : toolNames);
       const includeExtensionTools = orchestrationPolicy ? false : options.includeExtensionTools !== false;
+      // Determine which tools to pass based on requested toolNames.
+      // Since v0.68.0, session creation expects string[] tool names instead of Tool[] instances.
       let toolsOption: string[] | undefined;
       if (effectiveToolNames !== undefined) {
+        // toolNames === [] -> "all off" (an empty allow-list disables every tool).
+        // Otherwise DO NOT pass a builtin-only allow-list: passing CODING_TOOL_NAMES
+        // set allowedToolNames to coding builtins only, which filtered every
+        // extension/package-provided tool (e.g. subagents, web access) out of the
+        // tool registry — so they were unavailable in Pi Web sessions even though the
+        // `pi` CLI keeps them. Leaving the allow-list unset lets the SDK register all
+        // tools (and activate extension tools); we narrow the ACTIVE set below.
         toolsOption = effectiveToolNames.length === 0 || !includeExtensionTools ? effectiveToolNames : undefined;
       }
 
@@ -1616,25 +1693,61 @@ export async function startRpcSession(
             hidden: true,
           }]
         : [];
-      const runtimeCwd = sessionManager.getCwd();
       const resourceLoaderOptions = orchestrationPolicy
         ? { extensionsOverride: isolateOrchestratedSessionExtensions }
         : (extensionFactories.length > 0 ? { extensionFactories } : undefined);
+      // Build services first so extension-registered providers are available
+      // before the SDK restores the saved model from the session file.
       // Gate untrusted project extensions so opening a repository does not run
       // its .pi/extensions code automatically (see lib/project-trust.ts, #236).
-      const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
+      const trustReloadOptions = projectTrustReloadOptions(sessionCwd, agentDir);
       const services = await createAgentSessionServices({
-        cwd: runtimeCwd,
+        cwd: sessionCwd,
         agentDir,
         ...(resourceLoaderOptions ? { resourceLoaderOptions } : {}),
         ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
       });
+      const scope = await resolveVisibleModels(
+        services.modelRuntime,
+        services.settingsManager.getEnabledModels(),
+      );
+      const defaultProvider = services.settingsManager.getDefaultProvider();
+      const defaultModelId = services.settingsManager.getDefaultModel();
+      const hasExistingMessages = sessionManager.getBranch().some((entry) => entry.type === "message");
+      const initial = hasExistingMessages
+        ? { scopedModels: [...scope.scopedModels] }
+        : selectInitialModelScope(scope, {
+          ...(initialModel ? { requestedModel: initialModel } : {}),
+          ...(defaultProvider && defaultModelId
+            ? { defaultModel: { provider: defaultProvider, modelId: defaultModelId } }
+            : {}),
+          ...(thinkingLevel ? { thinkingLevel } : {}),
+        });
       const { session: inner } = await createAgentSessionFromServices({
         services,
         sessionManager,
+        ...(initial.model ? { model: initial.model } : {}),
+        ...(initial.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
+        ...(initial.scopedModels.length > 0 ? { scopedModels: initial.scopedModels } : {}),
         ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
         ...(orchestrationPolicy ? { orchestratedWorkerRuntime: runtimeLease } : {}),
       });
+
+      const persistedPreferences = await persistExplicitStartupPreferences(
+        services.settingsManager,
+        {
+          ...(initialModel ? { model: initialModel } : {}),
+          ...(thinkingLevel ? { thinkingLevel } : {}),
+        },
+        {
+          ...(inner.model
+            ? { model: { provider: inner.model.provider, modelId: inner.model.id } }
+            : {}),
+          thinkingLevel: inner.thinkingLevel,
+          supportsThinking: inner.supportsThinking(),
+        },
+      );
+      if (persistedPreferences.modelDefaultChanged) invalidateModelsCache();
 
       if (effectiveToolNames && effectiveToolNames.length > 0) {
         inner.setActiveToolsByName(

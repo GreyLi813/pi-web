@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { generateSessionTitle } from "@/lib/session-title";
 import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
 import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
@@ -16,18 +16,21 @@ export async function POST(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const header = SessionManager.open(filePath).getHeader();
-    if (header?.orchestration !== undefined) {
-      return NextResponse.json(
-        { error: "Orchestrated workers can only be changed through their owning controller Session" },
-        { status: 403 },
-      );
-    }
-    const cwd = header?.cwd ?? process.cwd();
     const existing = getRpcSession(id);
-    const { session } = existing?.isAlive()
-      ? { session: existing }
-      : await startRpcSession(id, filePath, cwd);
+    let session;
+    try {
+      ({ session } = existing?.isAlive()
+        ? { session: existing }
+        : await startRpcSession(id, filePath, undefined));
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("owning controller Session")) {
+        return NextResponse.json(
+          { error: "Orchestrated workers can only be changed through their owning controller Session" },
+          { status: 403 },
+        );
+      }
+      throw error;
+    }
 
     // globalThis keeps wrappers alive across dev hot reloads; older instances
     // may predate waitUntilReady(), but those have already completed startup.
