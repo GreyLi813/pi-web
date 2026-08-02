@@ -25,6 +25,10 @@ import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
+import {
+  installCodexImportProviderProjection,
+  readCodexImportRuntimePolicy,
+} from "./codex-import/runtime";
 import { createWebSessionOrchestrationHost, type WebSessionOrchestrationHost } from "./session-orchestration-host";
 
 // ============================================================================
@@ -165,6 +169,7 @@ export class AgentSessionWrapper {
   constructor(
     public readonly inner: AgentSessionLike,
     private readonly orchestrationPolicy?: OrchestratedRuntimePolicy,
+    private readonly startupExactToolNames?: readonly string[],
   ) {}
 
   get sessionId(): string {
@@ -293,6 +298,7 @@ export class AgentSessionWrapper {
       } else {
         this.inner.extensionRunner.setUIContext?.(uiContext, "rpc");
       }
+      this.applyStartupExactTools();
       this.extensionsBound = true;
       this.applyForcedEmptySystemPrompt();
       console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
@@ -323,7 +329,22 @@ export class AgentSessionWrapper {
       || type === "orchestrated_prompt"
       || type === "steer"
       || type === "follow_up"
+      || type === "get_tools"
+      || type === "set_tools"
+      || type === "set_tools_exact"
       || type === "get_commands";
+  }
+
+  /**
+   * Reapply an imported Session's exact initial Pi tool set after extensions register tools.
+   *
+   * @author GPT-5.6 Sol
+   * @version 1.0.0
+   */
+  private applyStartupExactTools(): void {
+    if (!this.orchestrationPolicy && this.startupExactToolNames) {
+      this.inner.setActiveToolsByName([...this.startupExactToolNames]);
+    }
   }
 
   private async withFinalRunningNotification<T>(operation: () => Promise<T>): Promise<T> {
@@ -892,6 +913,7 @@ export class AgentSessionWrapper {
         if (typeof this.inner.bindExtensions !== "function") {
           this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
         }
+        this.applyStartupExactTools();
         this.applyForcedEmptySystemPrompt();
         await this.applyOrchestrationPolicy();
         return { success: true };
@@ -1310,6 +1332,7 @@ export class AgentSessionWrapper {
             this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
           },
         });
+        this.applyStartupExactTools();
         this.applyForcedEmptySystemPrompt();
       },
     };
@@ -1556,6 +1579,9 @@ export async function startRpcSession(
           thinkingLevel: metadata.thinkingLevel,
         }
       : undefined;
+    const codexImportPolicy = !orchestrationPolicy && sessionFile
+      ? readCodexImportRuntimePolicy(sessionManager.getEntries())
+      : undefined;
     if (
       orchestrationPolicy
       && !ownerHostAuthorized
@@ -1574,7 +1600,7 @@ export async function startRpcSession(
       }
 
       // Persisted worker policy overrides every browser-provided tool option.
-      const effectiveToolNames = orchestrationPolicy?.toolNames ?? toolNames;
+      const effectiveToolNames = orchestrationPolicy?.toolNames ?? (codexImportPolicy ? undefined : toolNames);
       const includeExtensionTools = orchestrationPolicy ? false : options.includeExtensionTools !== false;
       let toolsOption: string[] | undefined;
       if (effectiveToolNames !== undefined) {
@@ -1615,8 +1641,16 @@ export async function startRpcSession(
           includeExtensionTools ? withExtensionTools(inner, effectiveToolNames) : effectiveToolNames,
         );
       }
+      if (codexImportPolicy) {
+        installCodexImportProviderProjection(inner.agent, codexImportPolicy);
+        inner.setActiveToolsByName(codexImportPolicy.initialToolNames);
+      }
 
-      const wrapper = new AgentSessionWrapper(inner, orchestrationPolicy);
+      const wrapper = new AgentSessionWrapper(
+        inner,
+        orchestrationPolicy,
+        codexImportPolicy?.initialToolNames,
+      );
       startingWrapper = wrapper;
       const forceEmptySystemPrompt = !orchestrationPolicy
         && effectiveToolNames?.length === 0

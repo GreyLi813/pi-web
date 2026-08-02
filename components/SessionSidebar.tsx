@@ -77,6 +77,7 @@ interface Props {
   selectedSessionId: string | null;
   onSelectSession: (session: SessionInfo, isRestore?: boolean) => void;
   onNewSession?: (sessionId: string, cwd: string) => void;
+  onOpenCodexImport: () => void;
   initialSessionId?: string | null;
   skipInitialProjectSelection?: boolean;
   onInitialRestoreDone?: () => void;
@@ -385,7 +386,7 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, onOpenCodexImport, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -882,6 +883,32 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 <line x1="1" y1="6" x2="11" y2="6" />
               </svg>
               {t("sidebar.new")}
+            </button>
+            <button
+              onClick={onOpenCodexImport}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: "var(--bg-hover)", border: "1px solid var(--border)",
+                color: "var(--text-muted)", cursor: "pointer",
+                width: 32, height: 32, padding: 0, borderRadius: 7, flexShrink: 0,
+                transition: "background 0.12s, color 0.12s, border-color 0.12s",
+              }}
+              onMouseEnter={(event) => {
+                event.currentTarget.style.background = "var(--bg-selected)";
+                event.currentTarget.style.color = "var(--accent)";
+                event.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
+              }}
+              onMouseLeave={(event) => {
+                event.currentTarget.style.background = "var(--bg-hover)";
+                event.currentTarget.style.color = "var(--text-muted)";
+                event.currentTarget.style.borderColor = "var(--border)";
+              }}
+              title={t("sidebar.importCodex")}
+              aria-label={t("sidebar.importCodex")}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 20h14" />
+              </svg>
             </button>
             <button
               onClick={() => loadSessions(false)}
