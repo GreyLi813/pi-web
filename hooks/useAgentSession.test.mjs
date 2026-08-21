@@ -6,6 +6,8 @@ const source = await readFile(new URL("./useAgentSession.ts", import.meta.url), 
 const chatWindowSource = await readFile(new URL("../components/ChatWindow.tsx", import.meta.url), "utf8");
 const chatInputSource = await readFile(new URL("../components/ChatInput.tsx", import.meta.url), "utf8");
 const appShellSource = await readFile(new URL("../components/AppShell.tsx", import.meta.url), "utf8");
+const eventRouteSource = await readFile(new URL("../app/api/agent/[id]/events/route.ts", import.meta.url), "utf8");
+const agentEventWireSource = await readFile(new URL("../lib/agent-event-wire.ts", import.meta.url), "utf8");
 
 test("keeps the session event stream open through the idle grace window", () => {
   const finishSource = source.slice(
@@ -299,6 +301,42 @@ test("shows the latest streamed tool execution progress in the running phase", (
   assert.match(updateSource, /tools: \[\.\.\.tools\.filter\([\s\S]*?, updated\]/);
   assert.match(chatWindowSource, /if \(latest\?\.progress\)/);
   assert.match(chatWindowSource, /chat\.runningNamedTool[\s\S]*latest\.progress/);
+});
+
+test("filters stale run epochs, targets cancellation, and aborts superseded loads", () => {
+  const eventSource = source.slice(
+    source.indexOf("const handleAgentEvent = useCallback"),
+    source.indexOf("handleAgentEventRef.current = handleAgentEvent"),
+  );
+  const sendSource = source.slice(
+    source.indexOf("  const handleSend = useCallback"),
+    source.indexOf("  const executeBash = useCallback"),
+  );
+  const abortSource = source.slice(
+    source.indexOf("  const handleAbort = useCallback"),
+    source.indexOf("  const handleFork = useCallback"),
+  );
+  const loadSource = source.slice(
+    source.indexOf("  const loadSession = useCallback"),
+    source.indexOf("  const loadTools = useCallback"),
+  );
+
+  assert.match(eventRouteSource, /runtimeInstanceId: getRpcRuntimeInstanceId\(\)/);
+  assert.match(agentEventWireSource, /runtimeInstanceId: event\.runtimeInstanceId/);
+  assert.match(agentEventWireSource, /runId: event\.runId/);
+  assert.match(agentEventWireSource, /runEpoch: event\.runEpoch/);
+  assert.match(eventSource, /acceptServerRunIdentity/);
+  assert.match(eventSource, /event\.runEpoch > previousEpoch/);
+  assert.match(sendSource, /runId: requestedRunId/);
+  assert.match(sendSource, /identity\.runId !== requestedRunId/);
+  assert.match(abortSource, /pending\.cancelRequested = true/);
+  assert.match(abortSource, /cancelRequestedRun/);
+  assert.doesNotMatch(abortSource, /type: "abort"/);
+  assert.match(loadSource, /sessionLoadGenerationRef\.current/);
+  assert.match(loadSource, /sessionLoadAbortRef\.current\?\.abort\(\)/);
+  assert.match(loadSource, /contextLoadGenerationRef\.current/);
+  assert.match(loadSource, /contextLoadAbortRef\.current\?\.abort\(\)/);
+  assert.match(loadSource, /signal: controller\.signal/);
 });
 
 test("plays the enabled sound once for each extension dialog", () => {

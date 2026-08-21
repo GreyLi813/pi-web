@@ -88,8 +88,8 @@ test("live detail and state routes work without a persisted JSONL file", async (
   assert.equal(detail.info.transient, true);
   assert.deepEqual(detail.context.messages.map((message) => message.content), ["hello live"]);
   assert.equal(stateResponse.status, 200);
-  assert.deepEqual(await stateResponse.json(), {
-    running: true,
-    state: { isStreaming: true },
-  });
+  const state = await stateResponse.json();
+  assert.equal(state.running, true);
+  assert.equal(typeof state.runtimeInstanceId, "string");
+  assert.deepEqual(state.state, { isStreaming: true });
 });

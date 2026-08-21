@@ -60,8 +60,25 @@ test("fails: rejects a nonexistent Session binding", async () => {
     prompt: "test",
     sessionId: "nonexistent-route-test-session",
   });
-  assert.equal(response.status, 400);
+  assert.equal(response.status, 404);
   assert.match((await response.json()).error, /not found/);
+});
+
+test("fails: rejects unsafe intervals and managed execution fields", async () => {
+  const tooShort = await post({
+    intervalSeconds: 9,
+    prompt: "test",
+    sessionId: scheduleSessionId,
+  });
+  assert.equal(tooShort.status, 400);
+  const managed = await post({
+    intervalSeconds: 60,
+    prompt: "test",
+    sessionId: scheduleSessionId,
+    fireCount: 3,
+  });
+  assert.equal(managed.status, 400);
+  assert.match((await managed.json()).error, /managed/);
 });
 
 test("fails: rejects partial model configuration", async () => {
@@ -178,7 +195,7 @@ test("fails safely: editing cannot change a schedule's session binding", async (
     prompt: "new prompt",
     sessionId: "other-session",
   });
-  assert.equal(response.status, 400);
+  assert.equal(response.status, 409);
   assert.match((await response.json()).error, /cannot be changed/);
 });
 

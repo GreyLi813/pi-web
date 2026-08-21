@@ -318,6 +318,8 @@ export interface SessionInfo {
   firstMessage: string;
   parentSessionId?: string; // set if this session was forked from another
   orchestration?: SessionOrchestrationMetadata;
+  /** Peer metadata is display-only; all mutation stays on the owner-authorized host path. */
+  peer?: { ownerSessionId: string; depth: number; authorityId?: string };
   /** Main repo root shared by all worktrees of this cwd (cwd itself for non-git dirs).
    *  Always set by the server; optional because the client builds transient
    *  SessionInfo objects before the first refresh. Fall back to cwd. */

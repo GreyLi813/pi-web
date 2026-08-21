@@ -32,6 +32,14 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function runIdentityFields(event: AgentEventLike): Record<string, unknown> {
+  return {
+    ...(typeof event.runtimeInstanceId === "string" ? { runtimeInstanceId: event.runtimeInstanceId } : {}),
+    ...(typeof event.runId === "string" ? { runId: event.runId } : {}),
+    ...(typeof event.runEpoch === "number" ? { runEpoch: event.runEpoch } : {}),
+  };
+}
+
 function toolCallMetadata(
   event: Record<string, unknown>,
 ): { id: string; toolName: string } | null {
@@ -68,9 +76,11 @@ export function toClientAgentEvent(
       || Array.isArray(assistantMessageEvent)
     ) return null;
 
+    const identity = runIdentityFields(event);
     if (!("partial" in assistantMessageEvent)) {
       return {
         type: "message_update",
+        ...identity,
         assistantMessageEvent,
       } as ClientMessageUpdateEvent;
     }
@@ -80,6 +90,7 @@ export function toClientAgentEvent(
     void _partial;
     return {
       type: "message_update",
+      ...identity,
       assistantMessageEvent: metadata ? { ...deltaEvent, ...metadata } : deltaEvent,
     } as ClientMessageUpdateEvent;
   }
@@ -87,13 +98,16 @@ export function toClientAgentEvent(
   if (event.type === "tool_execution_update") {
     return {
       type: "tool_execution_update",
+      ...runIdentityFields(event),
       toolCallId: event.toolCallId,
       toolName: event.toolName,
       partialResult: event.partialResult,
     };
   }
 
-  if (event.type === "agent_end") return { type: "agent_end" };
+  if (event.type === "agent_end") {
+    return { type: "agent_end", ...runIdentityFields(event) };
+  }
   return event;
 }
 

@@ -1,4 +1,5 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
+import type { Api, Message, Model } from "@earendil-works/pi-ai";
 import type {
   AgentSessionEvent,
   BashOperations,
@@ -14,10 +15,7 @@ export interface ContextUsage {
   tokens: number | null;
 }
 
-export interface ModelLike {
-  id: string;
-  provider: string;
-}
+export type ModelLike = Model<Api>;
 
 export interface ToolInfo {
   name: string;
@@ -146,6 +144,7 @@ export interface AgentSessionLike {
 
   readonly bindExtensions?: unknown;
   dispose(): void;
+  waitForRuntimeCleanup?(): Promise<void>;
   reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void>;
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
   prompt(text: string, options?: {

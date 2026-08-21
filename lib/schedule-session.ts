@@ -1,8 +1,10 @@
 export const DEFAULT_SCHEDULE_SESSION_NAME = "Scheduled tasks";
 
 interface EnsureScheduleSessionOptions {
-  sessionId: string | null;
+  runtimeSessionId: string | null;
+  persistedSessionId: string | null;
   createSession: () => Promise<string | null>;
+  persistSession: (sessionId: string) => Promise<void>;
   initializeSession: (sessionId: string) => Promise<void>;
   promoteSession: (sessionId: string) => void;
 }
@@ -16,16 +18,21 @@ interface EnsureScheduleSessionOptions {
  * @version 1.0.0
  */
 export async function ensureScheduleSession({
-  sessionId,
+  runtimeSessionId,
+  persistedSessionId,
   createSession,
+  persistSession,
   initializeSession,
   promoteSession,
 }: EnsureScheduleSessionOptions): Promise<string | null> {
-  if (sessionId) return sessionId;
+  if (persistedSessionId) return persistedSessionId;
 
-  const createdSessionId = await createSession();
+  const createdSessionId = runtimeSessionId ?? await createSession();
   if (!createdSessionId) return null;
 
+  // Persistence is the transaction boundary: SSE, naming, promotion, and
+  // schedule creation must never observe an in-memory-only Session ID.
+  await persistSession(createdSessionId);
   await initializeSession(createdSessionId);
   promoteSession(createdSessionId);
   return createdSessionId;

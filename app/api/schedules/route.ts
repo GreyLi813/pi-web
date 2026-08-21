@@ -1,47 +1,35 @@
 /**
- * Schedules API — CRUD for recurring prompt schedules.
+ * Strict ScheduleStore CRUD plus optional server-scheduler wake-up.
  *
- * Reads/writes ~/.pi/agent/schedules.json (same file the cron extension uses).
- *
- * GET  /api/schedules          → list all schedules
- * POST /api/schedules          → create, pause, edit, resume, bind, or dispatch
- * DELETE /api/schedules?id=... → cancel a schedule by ID
- *
- * @author OpenAI Codex
- * @version 3.0.0
+ * @author GPT-5.6 Sol
+ * @version 4.0.0
  */
 
-import { readFile, writeFile, mkdir } from "fs/promises";
-import { dirname, join } from "path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
-import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
 import {
-  dispatchScheduleToAgent,
-  getDueSchedules,
-  type PersistentSchedule,
-} from "@/lib/schedule-dispatch";
+  getAgentDir,
+  PeerAuthorityStore,
+  ScheduleStore,
+  type ScheduleBudget,
+  type ScheduleEntry,
+  type ScheduleRuntimePolicy,
+  storeSessionTarget,
+  verifySessionTarget,
+  verifyStoredSessionTarget,
+} from "@earendil-works/pi-coding-agent";
+import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
+import { resolveSessionPath } from "@/lib/session-reader";
+import {
+  requestPersistentScheduleRunCancel,
+  wakePersistentSessionScheduler,
+} from "@/lib/session-scheduler";
 
 export const dynamic = "force-dynamic";
 
-// ── Types ──────────────────────────────────────────────────────────────────
-
-interface ScheduleEntry extends PersistentSchedule {
-  createdAt: number;
-  lastFiredAt?: number;
-}
-
-interface PersistentStore {
-  version: number;
-  schedules: ScheduleEntry[];
-  updatedAt: number;
-}
-
 const THINKING_LEVELS = new Set(["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const SCHEDULE_ACTIONS = new Set(["dispatchDue", "pause", "resume", "update"]);
+const SCHEDULE_ACTIONS = new Set(["dispatchDue", "pause", "cancel", "resume", "update", "reauthorize"]);
 
-type ScheduleRequestBody = {
-  action?: "dispatchDue" | "pause" | "resume" | "update";
+interface ScheduleRequestBody {
+  action?: "dispatchDue" | "pause" | "cancel" | "resume" | "update" | "reauthorize";
   id?: string;
   intervalSeconds?: number;
   prompt?: string;
@@ -52,354 +40,323 @@ type ScheduleRequestBody = {
   modelId?: string;
   thinkingLevel?: string;
   sessionId?: string;
-};
-
-type ScheduleRuntime = typeof globalThis & {
-  __piScheduleDispatching?: boolean;
-  __piScheduleMutationTail?: Promise<void>;
-};
-
-const scheduleRuntime = globalThis as ScheduleRuntime;
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-/** Resolve the schedules file path under the active Pi Agent directory. */
-function getSchedulesPath(): string {
-  return join(getAgentDir(), "schedules.json");
+  maxCalls?: number;
+  maxConcurrentRuns?: number;
+  maxRetries?: number;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  maxCostUsd?: number;
 }
 
-/** Read the persistent schedules store. Returns empty array on any error. */
-async function readStore(): Promise<PersistentStore> {
-  try {
-    const filePath = getSchedulesPath();
-    const raw = await readFile(filePath, "utf-8");
-    const store = JSON.parse(raw) as PersistentStore;
-    if (!store || store.version !== 1 || !Array.isArray(store.schedules)) {
-      return { version: 1, schedules: [], updatedAt: Date.now() };
-    }
-    return store;
-  } catch {
-    return { version: 1, schedules: [], updatedAt: Date.now() };
-  }
+interface SchedulePolicyResponse {
+  version: 1;
+  toolNames: string[];
+  model?: { provider: string; modelId: string };
+  thinkingLevel: ScheduleRuntimePolicy["thinkingLevel"];
+  endpointFingerprint?: string;
 }
 
-/** Write the persistent schedules store to disk. */
-async function writeStore(store: PersistentStore): Promise<void> {
-  const filePath = getSchedulesPath();
-  try { await mkdir(dirname(filePath), { recursive: true }); } catch { /* ok */ }
-  store.updatedAt = Date.now();
-  await writeFile(filePath, JSON.stringify(store, null, 2), "utf-8");
-}
-
-/** Serialize schedule-store reads and writes within this server process. */
-async function withScheduleStoreLock<T>(operation: () => Promise<T>): Promise<T> {
-  const previous = scheduleRuntime.__piScheduleMutationTail ?? Promise.resolve();
-  let release = () => {};
-  const gate = new Promise<void>((resolve) => { release = () => resolve(); });
-  const tail = previous.then(() => gate);
-  scheduleRuntime.__piScheduleMutationTail = tail;
-
-  await previous;
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (scheduleRuntime.__piScheduleMutationTail === tail) {
-      scheduleRuntime.__piScheduleMutationTail = undefined;
-    }
-  }
-}
-
-/** Validate that a durable schedule target exists and is a controller Session.
+/** Return the one ScheduleStore bound to the explicit active Agent directory.
+ *
  * @author GPT-5.6 Sol
  * @version 1.0.0
  */
-async function validateScheduleTarget(sessionId: string): Promise<string | undefined> {
-  const filePath = await resolveSessionPath(sessionId);
-  if (!filePath) return `Session '${sessionId}' not found`;
-  if (readSessionHeader(filePath)?.orchestration !== undefined) {
-    return "Orchestrated worker sessions cannot own schedules";
-  }
-  return undefined;
+function scheduleStore(): ScheduleStore {
+  return new ScheduleStore(getAgentDir());
 }
 
-/** Return a validation error when only half of a model selection is provided. */
-function validateModelSelection(modelProvider: string | undefined, modelId: string | undefined): string | null {
-  if (Boolean(modelProvider?.trim()) !== Boolean(modelId?.trim())) {
-    return "modelProvider and modelId must be provided together";
-  }
-  return null;
-}
-
-/** Dispatch one due task to the session stored on that task.
+/** Project strict internal fields into the existing panel's flat display shape.
  *
- * The global lock prevents duplicate dispatch when several browser tabs poll
- * simultaneously. Busy sessions retain their due task for a later poll.
- *
- * @author OpenAI Codex
+ * @author GPT-5.6 Sol
  * @version 1.0.0
  */
-async function dispatchDueSchedule(): Promise<Response> {
-  if (scheduleRuntime.__piScheduleDispatching) {
-    return Response.json({ dispatched: false, reason: "dispatcher_busy" }, { status: 202 });
+function publicSchedule(schedule: ScheduleEntry): ScheduleEntry & {
+  sessionId: string;
+  modelProvider?: string;
+  modelId?: string;
+  thinkingLevel: string;
+} {
+  return {
+    ...schedule,
+    sessionId: schedule.target.sessionId,
+    modelProvider: schedule.policy.model?.provider,
+    modelId: schedule.policy.model?.modelId,
+    thinkingLevel: schedule.policy.thinkingLevel,
+  };
+}
+
+/** Convert a thrown store/validation error to a stable HTTP status.
+ *
+ * @author GPT-5.6 Sol
+ * @version 1.0.0
+ */
+function errorResponse(error: unknown): Response {
+  const message = error instanceof Error ? error.message : String(error);
+  const status = /peer Sessions can only be scheduled through their owning controller/i.test(message)
+    ? 403
+    : /not found/i.test(message)
+      ? 404
+      : /Pause the schedule|cannot be changed|cannot be removed|cannot resume|active in another process|live pending-run monitor|no longer cancellable/i.test(message)
+        ? 409
+        : /invalid JSON|Unsupported ScheduleStore version|Schedule store|Schedule entry|claim state is inconsistent|enabled state is inconsistent/i.test(message)
+          ? 500
+          : 400;
+  return Response.json({ error: message }, { status });
+}
+
+/** Require a finite safe integer at the HTTP boundary.
+ *
+ * @author GPT-5.6 Sol
+ * @version 1.0.0
+ */
+function safeInteger(value: unknown, name: string, minimum: number, maximum: number): number {
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+    throw new Error(`${name} must be a safe integer between ${minimum} and ${maximum}`);
   }
-  scheduleRuntime.__piScheduleDispatching = true;
+  return value as number;
+}
 
-  try {
-    return await withScheduleStoreLock(async () => {
-      const now = Date.now();
-      const store = await readStore();
-      const dueSchedules = getDueSchedules(store.schedules, now);
-
-      for (const schedule of dueSchedules) {
-        const sessionId = schedule.sessionId;
-        if (!sessionId) continue;
-        const filePath = await resolveSessionPath(sessionId);
-        if (!filePath) {
-          const stored = store.schedules.find((entry) => entry.id === schedule.id);
-          if (stored?.enabled) {
-            stored.enabled = false;
-            await writeStore(store);
-          }
-          continue;
-        }
-        const header = readSessionHeader(filePath);
-        if (header?.orchestration !== undefined) {
-          const stored = store.schedules.find((entry) => entry.id === schedule.id);
-          if (stored?.enabled) {
-            stored.enabled = false;
-            await writeStore(store);
-          }
-          continue;
-        }
-
-        let agent = getRpcSession(sessionId);
-        if (!agent?.isAlive()) {
-          const cwd = header?.cwd ?? process.cwd();
-          ({ session: agent } = await startRpcSession(sessionId, filePath, cwd));
-        }
-
-        if (!await dispatchScheduleToAgent(schedule, agent)) continue;
-
-        const completed = store.schedules.find((entry) => (
-          entry.id === schedule.id && entry.nextFireAt === schedule.nextFireAt
-        ));
-        if (completed) {
-          completed.nextFireAt = now + completed.intervalSeconds * 1000;
-          completed.fireCount += 1;
-          completed.lastFiredAt = now;
-          await writeStore(store);
-        }
-
-        return Response.json({
-          dispatched: true,
-          scheduleId: schedule.id,
-          sessionId,
-          modelProvider: schedule.modelProvider,
-          modelId: schedule.modelId,
-          thinkingLevel: schedule.thinkingLevel,
-        });
-      }
-
-      return Response.json({ dispatched: false, reason: "no_ready_schedule" });
-    });
-  } finally {
-    scheduleRuntime.__piScheduleDispatching = false;
+/** Validate paired model fields and supported Thinking input.
+ *
+ * @author GPT-5.6 Sol
+ * @version 1.0.0
+ */
+function validatePolicySelection(body: ScheduleRequestBody): void {
+  if (Boolean(body.modelProvider?.trim()) !== Boolean(body.modelId?.trim())) {
+    throw new Error("modelProvider and modelId must be provided together");
+  }
+  if (body.thinkingLevel !== undefined && !THINKING_LEVELS.has(body.thinkingLevel)) {
+    throw new Error(`Unsupported thinkingLevel '${body.thinkingLevel}'`);
   }
 }
 
-// ── Route Handler ──────────────────────────────────────────────────────────
+/** Parse optional hard budgets while leaving token/cost fields reserved and enforced.
+ *
+ * @author GPT-5.6 Sol
+ * @version 1.0.0
+ */
+function requestBudget(body: ScheduleRequestBody): Partial<ScheduleBudget> | undefined {
+  const values = {
+    maxCalls: body.maxCalls,
+    maxConcurrentRuns: body.maxConcurrentRuns,
+    maxRetries: body.maxRetries,
+    maxInputTokens: body.maxInputTokens,
+    maxOutputTokens: body.maxOutputTokens,
+    maxCostUsd: body.maxCostUsd,
+  };
+  return Object.values(values).some((value) => value !== undefined) ? values : undefined;
+}
 
+/** Resolve and securely verify one exact non-worker Session target.
+ *
+ * @author GPT-5.6 Sol
+ * @version 1.0.0
+ */
+async function verifyScheduleTarget(sessionId: string) {
+  const sessionFile = await resolveSessionPath(sessionId);
+  if (!sessionFile) throw new Error(`Session '${sessionId}' not found`);
+  const target = await verifySessionTarget({
+    sessionId,
+    sessionFile,
+    cwd: undefined,
+  });
+  if (target.header.orchestration !== undefined) {
+    throw new Error("Orchestrated workers cannot own schedules");
+  }
+  if (target.header.peer !== undefined) {
+    throw new Error("Peer Sessions can only be scheduled through their owning controller authority");
+  }
+  return target;
+}
+
+/** Reject generic mutations of schedules governed by peer host authority.
+ * @author GPT-5.6 Sol
+ * @version 1.0.0
+ */
+async function assertGenericScheduleMutationAllowed(schedule: ScheduleEntry): Promise<void> {
+  if (schedule.peerAuthorityId) {
+    throw new Error("Peer Sessions can only be scheduled through their owning controller authority");
+  }
+  const authority = await new PeerAuthorityStore(getAgentDir()).read();
+  if (authority.authorities.some((entry) => entry.peerTarget.fileKey === schedule.target.fileKey)) {
+    throw new Error("Peer Sessions can only be scheduled through their owning controller authority");
+  }
+  try {
+    const target = await verifyStoredSessionTarget(schedule.target);
+    if (target.header.peer !== undefined) {
+      throw new Error("Peer Sessions can only be scheduled through their owning controller authority");
+    }
+  } catch (error) {
+    if (/Peer Sessions can only/.test(error instanceof Error ? error.message : String(error))) throw error;
+    // A missing ordinary target may still be paused or removed safely.
+  }
+}
+
+/** Capture exact tools/model/Thinking/endpoint, using no-tools for a cold ordinary Session.
+ *
+ * @author GPT-5.6 Sol
+ * @version 1.0.0
+ */
+async function captureSchedulePolicy(
+  target: Awaited<ReturnType<typeof verifyScheduleTarget>>,
+  body: Pick<ScheduleRequestBody, "modelProvider" | "modelId" | "thinkingLevel">,
+): Promise<ScheduleRuntimePolicy> {
+  validatePolicySelection(body);
+  let agent = getRpcSession(target.sessionId);
+  if (!agent?.isAlive()) {
+    ({ session: agent } = await startRpcSession(
+      target.sessionId,
+      target.sessionFile,
+      target.cwd,
+      {
+        expectedSessionTarget: storeSessionTarget(target),
+        toolNames: [],
+        includeExtensionTools: false,
+        preserveSystemPromptWithoutTools: true,
+      },
+    ));
+  }
+  if (agent.sessionFile !== target.sessionFile) throw new Error("Schedule target wrapper identity does not match");
+  const policy = await agent.send({
+    type: "get_schedule_policy",
+    modelProvider: body.modelProvider?.trim() || undefined,
+    modelId: body.modelId?.trim() || undefined,
+    thinkingLevel: body.thinkingLevel ?? "auto",
+  }) as SchedulePolicyResponse;
+  return {
+    version: 1,
+    toolNames: [...policy.toolNames],
+    model: policy.model,
+    thinkingLevel: policy.thinkingLevel,
+    endpointFingerprint: policy.endpointFingerprint,
+  };
+}
+
+/** List all schedules without converting corrupt storage into an empty result.
+ *
+ * @author GPT-5.6 Sol
+ * @version 4.0.0
+ */
 export async function GET(): Promise<Response> {
   try {
-    return await withScheduleStoreLock(async () => {
-      const store = await readStore();
-      return Response.json({ schedules: store.schedules });
-    });
-  } catch (e) {
-    return Response.json({ error: String(e) }, { status: 500 });
+    const store = await scheduleStore().read();
+    return Response.json({ schedules: store.schedules.map(publicSchedule) });
+  } catch (error) {
+    return errorResponse(error);
   }
 }
 
-export async function POST(req: Request): Promise<Response> {
+/** Create, pause, resume, update, or wake strict persistent schedules.
+ *
+ * @author GPT-5.6 Sol
+ * @version 4.0.0
+ */
+export async function POST(request: Request): Promise<Response> {
   try {
-    const body = await req.json().catch(() => ({})) as ScheduleRequestBody;
-
+    const body = await request.json().catch(() => ({})) as ScheduleRequestBody;
     if (body.action !== undefined && !SCHEDULE_ACTIONS.has(body.action)) {
-      return Response.json({ error: `Unsupported action '${body.action}'` }, { status: 400 });
+      throw new Error(`Unsupported action '${body.action}'`);
     }
-    if (body.action === "dispatchDue") return dispatchDueSchedule();
-    if (body.action && !body.id) {
-      return Response.json({ error: `action '${body.action}' requires an id` }, { status: 400 });
+    if (body.action === "dispatchDue") {
+      const result = await wakePersistentSessionScheduler();
+      return Response.json({ dispatched: result.succeeded > 0, ...result });
     }
-    if (body.thinkingLevel !== undefined && !THINKING_LEVELS.has(body.thinkingLevel)) {
-      return Response.json({ error: `Unsupported thinkingLevel '${body.thinkingLevel}'` }, { status: 400 });
+    const store = scheduleStore();
+    if (body.action) {
+      if (!body.id?.trim()) throw new Error(`action '${body.action}' requires an id`);
+      const current = (await store.read()).schedules.find((entry) => entry.id === body.id);
+      if (!current) throw new Error(`Schedule '${body.id}' not found`);
+      await assertGenericScheduleMutationAllowed(current);
+      if (body.action === "pause") {
+        return Response.json({ schedule: publicSchedule(await store.pause(body.id)) });
+      }
+      if (body.action === "cancel") {
+        if (
+          !current.claim
+          || (current.state !== "running" && current.state !== "pending-terminal")
+        ) {
+          throw new Error("Only a running Schedule can be cancelled");
+        }
+        const paused = await store.pause(body.id, "Cancellation requested by user");
+        const requested = await requestPersistentScheduleRunCancel(body.id, current.claim.runId);
+        if (!requested) {
+          throw new Error("Schedule has no live pending-run monitor; it remains paused and will not auto-retry");
+        }
+        return Response.json({ schedule: publicSchedule(paused), cancelRequested: true });
+      }
+      if (body.action === "resume") {
+        return Response.json({ schedule: publicSchedule(await store.resume(body.id)) });
+      }
+      if (body.action === "reauthorize") {
+        if (typeof body.sessionId !== "string" || !body.sessionId.trim()) {
+          throw new Error("Schedule re-authorization requires sessionId");
+        }
+        const target = await verifyScheduleTarget(body.sessionId.trim());
+        const policy = await captureSchedulePolicy(target, body);
+        return Response.json({ schedule: publicSchedule(await store.reauthorize(body.id, target, policy)) });
+      }
+      if (body.enabled !== undefined || body.nextFireAt !== undefined || body.fireCount !== undefined || body.sessionId !== undefined) {
+        throw new Error("enabled, nextFireAt, fireCount, and Session binding cannot be changed");
+      }
+      const changes: Parameters<ScheduleStore["update"]>[1] = {};
+      if (body.intervalSeconds !== undefined) {
+        changes.intervalSeconds = safeInteger(body.intervalSeconds, "intervalSeconds", 10, 31_536_000);
+      }
+      if (body.prompt !== undefined) {
+        if (typeof body.prompt !== "string" || !body.prompt.trim()) throw new Error("prompt must be non-empty");
+        changes.prompt = body.prompt.trim();
+      }
+      if (body.modelProvider !== undefined || body.modelId !== undefined || body.thinkingLevel !== undefined) {
+        const target = await verifyScheduleTarget(current.target.sessionId);
+        if (target.sessionFile !== current.target.sessionFile) throw new Error("Schedule target identity changed");
+        changes.policy = await captureSchedulePolicy(target, body);
+      }
+      const updated = await store.update(body.id, changes);
+      return Response.json({ schedule: publicSchedule(updated) });
     }
 
-    return await withScheduleStoreLock(async () => {
-      const store = await readStore();
-
-      if (body.id) {
-        const schedule = store.schedules.find((entry) => entry.id === body.id);
-        if (!schedule) {
-          return Response.json({ error: `Schedule '${body.id}' not found` }, { status: 404 });
-        }
-
-        if (body.action === "pause") {
-          if (schedule.enabled) {
-            schedule.enabled = false;
-            await writeStore(store);
-          }
-          return Response.json({ schedule });
-        }
-
-        if (body.action === "resume") {
-          const targetError = schedule.sessionId
-            ? await validateScheduleTarget(schedule.sessionId)
-            : "Schedule has no bound Session";
-          if (targetError) {
-            schedule.enabled = false;
-            await writeStore(store);
-            return Response.json({ error: targetError }, { status: 409 });
-          }
-          if (!schedule.enabled) {
-            schedule.enabled = true;
-            schedule.nextFireAt = Date.now() + schedule.intervalSeconds * 1000;
-            await writeStore(store);
-          }
-          return Response.json({ schedule });
-        }
-
-        if (body.action === "update") {
-          if (schedule.enabled) {
-            return Response.json({ error: "Pause the schedule before editing it" }, { status: 409 });
-          }
-          if (body.sessionId !== undefined) {
-            return Response.json({ error: "A schedule's session binding cannot be changed" }, { status: 400 });
-          }
-          if (body.enabled !== undefined || body.nextFireAt !== undefined || body.fireCount !== undefined) {
-            return Response.json({ error: "enabled, nextFireAt, and fireCount are managed by pause/resume/dispatch" }, { status: 400 });
-          }
-          if (body.intervalSeconds !== undefined && (
-            typeof body.intervalSeconds !== "number" || body.intervalSeconds < 10
-          )) {
-            return Response.json({ error: "intervalSeconds must be a number >= 10" }, { status: 400 });
-          }
-          if (body.prompt !== undefined && (typeof body.prompt !== "string" || !body.prompt.trim())) {
-            return Response.json({ error: "prompt must be a non-empty string" }, { status: 400 });
-          }
-
-          const modelFieldsProvided = body.modelProvider !== undefined || body.modelId !== undefined;
-          const modelError = modelFieldsProvided
-            ? validateModelSelection(body.modelProvider, body.modelId)
-            : null;
-          if (modelError) return Response.json({ error: modelError }, { status: 400 });
-
-          const hasEditableField = body.intervalSeconds !== undefined
-            || body.prompt !== undefined
-            || modelFieldsProvided
-            || body.thinkingLevel !== undefined;
-          if (!hasEditableField) {
-            return Response.json({ error: "No editable schedule fields were provided" }, { status: 400 });
-          }
-
-          if (body.intervalSeconds !== undefined) schedule.intervalSeconds = body.intervalSeconds;
-          if (body.prompt !== undefined) schedule.prompt = body.prompt.trim();
-          if (modelFieldsProvided) {
-            schedule.modelProvider = body.modelProvider?.trim() || undefined;
-            schedule.modelId = body.modelId?.trim() || undefined;
-          }
-          if (body.thinkingLevel !== undefined) {
-            schedule.thinkingLevel = body.thinkingLevel === "auto" ? undefined : body.thinkingLevel;
-          }
-          await writeStore(store);
-          return Response.json({ schedule });
-        }
-
-        // Legacy schedules may be bound once, but ownership is immutable afterwards.
-        if (body.sessionId !== undefined) {
-          const requestedSessionId = body.sessionId.trim();
-          if (!requestedSessionId) {
-            return Response.json({ error: "sessionId must be a non-empty string" }, { status: 400 });
-          }
-          if (schedule.sessionId && schedule.sessionId !== requestedSessionId) {
-            return Response.json({ error: "A schedule's session binding cannot be changed" }, { status: 409 });
-          }
-          if (!schedule.sessionId) {
-            const targetError = await validateScheduleTarget(requestedSessionId);
-            if (targetError) return Response.json({ error: targetError }, { status: 400 });
-            schedule.sessionId = requestedSessionId;
-            await writeStore(store);
-          }
-          return Response.json({ schedule });
-        }
-
-        return Response.json({ error: "An update action is required" }, { status: 400 });
-      }
-
-      if (!body.intervalSeconds || typeof body.intervalSeconds !== "number" || body.intervalSeconds < 10) {
-        return Response.json({ error: "intervalSeconds must be a number >= 10" }, { status: 400 });
-      }
-      if (!body.prompt || typeof body.prompt !== "string" || !body.prompt.trim()) {
-        return Response.json({ error: "prompt is required and must be a non-empty string" }, { status: 400 });
-      }
-      if (!body.sessionId || typeof body.sessionId !== "string" || !body.sessionId.trim()) {
-        return Response.json({ error: "sessionId is required for a schedule" }, { status: 400 });
-      }
-
-      const modelError = validateModelSelection(body.modelProvider, body.modelId);
-      if (modelError) return Response.json({ error: modelError }, { status: 400 });
-      const targetError = await validateScheduleTarget(body.sessionId.trim());
-      if (targetError) return Response.json({ error: targetError }, { status: 400 });
-      if (store.schedules.length >= 50) {
-        return Response.json({ error: "Maximum of 50 schedules reached" }, { status: 400 });
-      }
-
-      const entry: ScheduleEntry = {
-        id: `cron-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-        intervalSeconds: body.intervalSeconds,
-        prompt: body.prompt.trim(),
-        nextFireAt: body.nextFireAt ?? (Date.now() + body.intervalSeconds * 1000),
-        enabled: body.enabled !== false,
-        source: "persistent",
-        createdAt: Date.now(),
-        fireCount: 0,
-        modelProvider: body.modelProvider?.trim() || undefined,
-        modelId: body.modelId?.trim() || undefined,
-        thinkingLevel: body.thinkingLevel === "auto" ? undefined : body.thinkingLevel,
-        sessionId: body.sessionId.trim(),
-      };
-
-      store.schedules.push(entry);
-      await writeStore(store);
-      return Response.json({ schedule: entry }, { status: 201 });
+    if (typeof body.sessionId !== "string" || !body.sessionId.trim()) throw new Error("sessionId is required");
+    if (body.fireCount !== undefined || body.id !== undefined) throw new Error("id and fireCount are managed by ScheduleStore");
+    const intervalSeconds = safeInteger(body.intervalSeconds, "intervalSeconds", 10, 31_536_000);
+    if (typeof body.prompt !== "string" || !body.prompt.trim()) throw new Error("prompt is required and must be non-empty");
+    if (body.enabled !== undefined && typeof body.enabled !== "boolean") throw new Error("enabled must be a boolean");
+    const nextFireAt = body.nextFireAt === undefined
+      ? undefined
+      : safeInteger(body.nextFireAt, "nextFireAt", 0, Number.MAX_SAFE_INTEGER);
+    validatePolicySelection(body);
+    const target = await verifyScheduleTarget(body.sessionId.trim());
+    const policy = await captureSchedulePolicy(target, body);
+    const created = await store.create({
+      target,
+      intervalSeconds,
+      prompt: body.prompt.trim(),
+      policy,
+      nextFireAt,
+      enabled: body.enabled,
+      budget: requestBudget(body),
     });
-  } catch (e) {
-    return Response.json({ error: String(e) }, { status: 500 });
+    void wakePersistentSessionScheduler();
+    return Response.json({ schedule: publicSchedule(created) }, { status: 201 });
+  } catch (error) {
+    return errorResponse(error);
   }
 }
 
-export async function DELETE(req: Request): Promise<Response> {
+/** Delete one schedule under the shared cross-process store lock.
+ *
+ * @author GPT-5.6 Sol
+ * @version 4.0.0
+ */
+export async function DELETE(request: Request): Promise<Response> {
   try {
-    const url = new URL(req.url);
-    const id = url.searchParams.get("id");
-    if (!id) {
-      return Response.json({ error: "Missing ?id= parameter" }, { status: 400 });
-    }
-
-    return await withScheduleStoreLock(async () => {
-      const store = await readStore();
-      const idx = store.schedules.findIndex((schedule) => schedule.id === id);
-      if (idx === -1) {
-        return Response.json({ error: `Schedule '${id}' not found` }, { status: 404 });
-      }
-
-      const removed = store.schedules[idx];
-      store.schedules.splice(idx, 1);
-      await writeStore(store);
-      return Response.json({ removed });
-    });
-  } catch (e) {
-    return Response.json({ error: String(e) }, { status: 500 });
+    const id = new URL(request.url).searchParams.get("id");
+    if (!id) throw new Error("Missing ?id= parameter");
+    const store = scheduleStore();
+    const current = (await store.read()).schedules.find((entry) => entry.id === id);
+    if (!current) throw new Error(`Schedule '${id}' not found`);
+    await assertGenericScheduleMutationAllowed(current);
+    return Response.json({ removed: publicSchedule(await store.remove(id)) });
+  } catch (error) {
+    return errorResponse(error);
   }
 }

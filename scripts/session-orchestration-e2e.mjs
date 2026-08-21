@@ -463,7 +463,7 @@ async function main() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ type: "get_last_assistant_text" }),
       }),
-      /owning controller Session/,
+      /owning controller/,
     );
     // Live worker is observable read-only through state and SSE.
     const liveState = await requestJson(`/api/sessions/${workerId}/state`);
@@ -472,6 +472,10 @@ async function main() {
     const liveEvents = await fetch(`${baseUrl}/api/agent/${workerId}/events`);
     assert.equal(liveEvents.status, 200);
     liveEvents.body?.cancel();
+    await assert.rejects(
+      () => requestJson(`/api/sessions/${workerId}/auto-name`, { method: "POST" }),
+      /owning controller/,
+    );
 
     await assert.rejects(
       () => requestJson(`/api/agent/${workerId}`, {
@@ -479,7 +483,7 @@ async function main() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ type: "set_tools", toolNames: ["read", "bash", "edit", "write"] }),
       }),
-      /owning controller Session/,
+      /owning controller/,
     );
     await assert.rejects(
       () => requestJson(`/api/agent/${workerId}`, {
@@ -487,7 +491,7 @@ async function main() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ type: "bash", command: "echo unsafe" }),
       }),
-      /owning controller Session/,
+      /owning controller/,
     );
 
     await assert.rejects(
@@ -496,7 +500,7 @@ async function main() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ type: "prompt", message: "UNAUTHORIZED_GENERIC_PROMPT" }),
       }),
-      /owning controller Session/,
+      /owning controller/,
     );
     await assert.rejects(
       () => requestJson("/api/schedules", {
@@ -523,8 +527,8 @@ async function main() {
     }
     assert.equal(workerRunning, true, "worker never entered its slow running state");
     const deleteResponse = await fetch(`${baseUrl}/api/sessions/${workerId}`, { method: "DELETE" });
-    assert.equal(deleteResponse.status, 409);
-    assert.match((await deleteResponse.json()).error, /running, starting/);
+    assert.equal(deleteResponse.status, 403);
+    assert.match((await deleteResponse.json()).error, /owning controller/);
     await waitForTurn(controllerId, previousControllerText);
     assert.equal(await getLastText(controllerId), "SLOW_COMPLETED");
     await requestJson(`/api/sessions/${workerId}`);
@@ -554,13 +558,13 @@ async function main() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ type: "get_state" }),
       }),
-      /owning controller Session/,
+      /owning controller/,
     );
     const idleEvents = await fetch(`${baseUrl}/api/agent/${idleWorkerId}/events`);
     assert.equal(idleEvents.status, 403);
     await assert.rejects(
       () => requestJson(`/api/sessions/${idleWorkerId}/auto-name`, { method: "POST" }),
-      /owning controller Session/,
+      /owning controller/,
     );
     await assert.rejects(
       () => requestJson(`/api/sessions/${idleWorkerId}`, {
@@ -568,7 +572,7 @@ async function main() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: "Unauthorized rename" }),
       }),
-      /owning controller Session/,
+      /owning controller/,
     );
     leaseProcess = spawn(process.execPath, [
       "--input-type=module",
@@ -582,8 +586,8 @@ async function main() {
     ], { cwd: webRoot, stdio: ["ignore", "pipe", "pipe"] });
     await waitForChildOutput(leaseProcess, "LEASE_READY");
     const remoteDelete = await fetch(`${baseUrl}/api/sessions/${idleWorkerId}`, { method: "DELETE" });
-    assert.equal(remoteDelete.status, 409);
-    assert.match((await remoteDelete.json()).error, /active in another process/);
+    assert.equal(remoteDelete.status, 403);
+    assert.match((await remoteDelete.json()).error, /owning controller/);
     stopWebProcess(leaseProcess);
     leaseProcess = undefined;
 

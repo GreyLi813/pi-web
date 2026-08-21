@@ -1,14 +1,16 @@
 import { NextResponse } from "next/server";
+import { verifySessionTarget } from "@earendil-works/pi-coding-agent";
+import { assertGenericSessionMutationAllowed } from "@/lib/model-controlled-session";
 import { resolveSessionPath } from "@/lib/session-reader";
-import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { getRpcRuntimeInstanceId, startRpcSession, getRpcSession } from "@/lib/rpc-manager";
 
 /** Reject generic routes that would bypass durable controller ownership.
  * @author GPT-5.6 Sol
  * @version 1.0.0
  */
-function workerRouteRejection(): NextResponse {
+function controlledRouteRejection(): NextResponse {
   return NextResponse.json(
-    { error: "Orchestrated workers can only be accessed through their owning controller Session" },
+    { error: "Peer Sessions can only be accessed through peer owner authority; orchestrated workers can only be accessed through their owning controller Session" },
     { status: 403 },
   );
 }
@@ -29,7 +31,15 @@ export async function POST(
     // Fast path: already-running session
     const existing = getRpcSession(id);
     if (existing?.isAlive()) {
-      if (existing.isOrchestratedWorker()) return workerRouteRejection();
+      if (existing.isRestrictedModelControlledSession()) return controlledRouteRejection();
+      if (existing.sessionFile) {
+        const target = await verifySessionTarget({ sessionId: id, sessionFile: existing.sessionFile });
+        try {
+          await assertGenericSessionMutationAllowed(target, "accessed");
+        } catch {
+          return controlledRouteRejection();
+        }
+      }
       const result = await existing.send(body);
       promptAccepted = body.type === "prompt";
       return NextResponse.json({ success: true, data: result });
@@ -49,8 +59,8 @@ export async function POST(
     try {
       ({ session } = await startRpcSession(id, filePath, undefined));
     } catch (error) {
-      if (error instanceof Error && error.message.includes("owning controller Session")) {
-        return workerRouteRejection();
+      if (error instanceof Error && /owning controller|controller authority/.test(error.message)) {
+        return controlledRouteRejection();
       }
       throw error;
     }
@@ -78,13 +88,13 @@ export async function GET(
   try {
     const session = getRpcSession(id);
     if (!session || !session.isAlive()) {
-      return NextResponse.json({ running: false });
+      return NextResponse.json({ running: false, runtimeInstanceId: getRpcRuntimeInstanceId() });
     }
 
     // Read-only observation of a live worker is allowed: its JSONL is already
     // browsable in this local UI. Only mutation/startup paths stay forbidden.
     const state = await session.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state });
+    return NextResponse.json({ running: true, runtimeInstanceId: getRpcRuntimeInstanceId(), state });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

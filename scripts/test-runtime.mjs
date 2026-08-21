@@ -134,7 +134,7 @@ export async function syncTestCronExtension(paths) {
  * @version 1.0.0
  */
 export function createTestRuntimeEnvironment(paths, baseEnvironment = process.env) {
-  return {
+  const environment = {
     ...baseEnvironment,
     NODE_ENV: "development",
     PORT: TEST_WEB_PORT,
@@ -144,6 +144,13 @@ export function createTestRuntimeEnvironment(paths, baseEnvironment = process.en
     PI_WEB_AGENT_SOURCE_DIR: join(paths.agentRepo, "packages", "coding-agent"),
     PI_WEB_NO_OPEN: "1",
   };
+  // A packaged host (release/pi-stack) exports a stale standalone Next config
+  // and its own origin; a spawned dev server must never inherit either.
+  delete environment.__NEXT_PRIVATE_STANDALONE_CONFIG;
+  delete environment.__NEXT_PRIVATE_ORIGIN;
+  delete environment.PI_SESSION_FILE;
+  delete environment.PI_SESSION_ID;
+  return environment;
 }
 
 /** Prepare local package snapshots, isolated data, and the local test extension.

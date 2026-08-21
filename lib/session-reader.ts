@@ -4,7 +4,7 @@ import {
   buildSessionContext as piBuildSessionContext,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { closeSync, openSync, readSync } from "fs";
+import { closeSync, existsSync, openSync, readSync } from "fs";
 import { normalize as normalizePath } from "path";
 import type { AgentMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
@@ -63,6 +63,7 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       firstMessage: s.firstMessage || "(no messages)",
       parentSessionId: s.parentSessionPath ? pathToId.get(sessionPathKey(s.parentSessionPath)) : undefined,
       orchestration: s.orchestration,
+      peer: s.peer,
       transient: false,
     };
   });
@@ -136,13 +137,32 @@ function getPathToIdCache(): Map<string, string> {
   return globalThis.__piPathToSessionIdCache;
 }
 
+/** Resolve a Session path with bounded self-healing for scan/create races.
+ *
+ * @author GPT-5.6 Sol
+ * @version 2.0.0
+ */
 export async function resolveSessionPath(sessionId: string): Promise<string | null> {
   const cached = getPathCache().get(sessionId);
-  if (cached) return cached;
+  if (cached) {
+    if (existsSync(cached) && readSessionHeader(cached)?.id === sessionId) return cached;
+    invalidateSessionPathCache(sessionId);
+  }
 
-  // Cache miss: scan all sessions to populate cache, then retry
-  await listAllSessions();
-  return getPathCache().get(sessionId) ?? null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await listAllSessions();
+    const resolved = getPathCache().get(sessionId);
+    if (resolved && existsSync(resolved) && readSessionHeader(resolved)?.id === sessionId) return resolved;
+
+    // A fresh TTL result or a scan that began before creation can both miss a
+    // newly persisted external Session. Invalidate and perform a real rescan.
+    invalidateSessionListCache();
+    // Always allow one final physical rescan: an external creator does not
+    // participate in this process's generation counter and may have appeared
+    // while readdir was already in flight.
+    await Promise.resolve();
+  }
+  return null;
 }
 
 export async function resolveSessionIdByPath(filePath: string): Promise<string | undefined> {

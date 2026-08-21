@@ -24,6 +24,7 @@ export function createAgentEventStream(
   req: Request,
   sessionId: string,
   sessionPromise: Promise<AgentEventStreamSession>,
+  options: { runtimeInstanceId?: string } = {},
 ): ReadableStream<Uint8Array> {
   let cancelStream: (closeController: boolean) => void = () => {};
 
@@ -92,6 +93,7 @@ export function createAgentEventStream(
             type: "connected",
             sessionId,
             isStreaming: session.isStreaming,
+            ...(options.runtimeInstanceId ? { runtimeInstanceId: options.runtimeInstanceId } : {}),
           });
           for (const event of bufferedEvents) forwardEvent(event, snapshot);
           if (snapshot !== undefined && snapshot !== null) {

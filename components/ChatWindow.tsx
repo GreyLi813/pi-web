@@ -279,7 +279,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
     loading, error, messages, entryIds, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
-    isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats,
+    isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats, persistedSessionId,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection,
@@ -297,7 +297,6 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
   });
   const sessionBusy = agentRunning || bashRunning;
-  const activeSessionId = session?.id ?? sessionIdRef.current ?? null;
 
   useEffect(() => {
     if (!extensionDialog || soundedExtensionDialogIdRef.current === extensionDialog.id) return;
@@ -532,7 +531,20 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
     : null;
 
-  const chatInputElement = (
+  const modelControlledOwnerId = session?.peer?.ownerSessionId ?? session?.orchestration?.ownerSessionId;
+  const chatInputElement = modelControlledOwnerId ? (
+    <div style={{
+      margin: "8px 12px 12px",
+      padding: "10px 12px",
+      border: "1px solid var(--border)",
+      borderRadius: 8,
+      color: "var(--text-muted)",
+      fontSize: 12,
+      lineHeight: 1.5,
+    }}>
+      This model-controlled Session is read-only here. Open owner Session {modelControlledOwnerId} and use its peer/worker tools to operate it safely.
+    </div>
+  ) : (
     <ChatInput
       ref={chatInputRef}
       onSend={handleSend}
@@ -575,7 +587,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionD
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? newSessionDraftKey ?? undefined}
       cwd={session?.cwd ?? newSessionCwd}
-      sessionId={activeSessionId}
+      sessionId={persistedSessionId}
       onEnsureScheduleSession={handleEnsureScheduleSession}
     />
   );

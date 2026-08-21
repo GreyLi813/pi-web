@@ -19,10 +19,15 @@ interface ScheduleEntry {
   prompt: string;
   nextFireAt: number;
   enabled: boolean;
+  state?: "scheduled" | "claimed" | "running" | "pending-terminal" | "paused";
   source: string;
   createdAt: number;
   lastFiredAt?: number;
   fireCount: number;
+  failureCount?: number;
+  lastError?: string;
+  pausedReason?: string;
+  requiresReauthorization?: true;
   modelProvider?: string;
   modelId?: string;
   thinkingLevel?: string;
@@ -200,7 +205,7 @@ export function SchedulesPanel({
       const res = await fetch("/api/schedules", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, sessionId }),
+        body: JSON.stringify({ action: "reauthorize", id, sessionId }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await fetchSchedules();
@@ -263,8 +268,8 @@ export function SchedulesPanel({
     }
   };
 
-  /** Pause or resume without changing configuration or execution history. */
-  const handleLifecycleAction = async (id: string, action: "pause" | "resume") => {
+  /** Pause, cancel, or resume without changing configuration or execution history. */
+  const handleLifecycleAction = async (id: string, action: "pause" | "cancel" | "resume") => {
     setActionScheduleId(id);
     setError(null);
     try {
@@ -278,6 +283,7 @@ export function SchedulesPanel({
       await fetchSchedules();
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : String(actionError));
+      await fetchSchedules().catch(() => undefined);
     } finally {
       setActionScheduleId(null);
     }
@@ -303,7 +309,7 @@ export function SchedulesPanel({
   // ── Render helpers ────────────────────────────────────────────────────
 
   const visibleSchedules = schedules.filter((schedule) =>
-    schedule.sessionId === sessionId || schedule.sessionId === undefined,
+    schedule.sessionId === sessionId || schedule.sessionId === undefined || schedule.requiresReauthorization === true,
   );
   const activeCount = visibleSchedules.filter((schedule) => schedule.enabled).length;
   const addDisabled = schedules.length >= 50 || (!sessionId && !canCreateSession);
@@ -369,6 +375,9 @@ export function SchedulesPanel({
 
         {visibleSchedules.map((schedule) => {
           const actionPending = actionScheduleId === schedule.id;
+          const executionActive = schedule.state === "claimed"
+            || schedule.state === "running"
+            || schedule.state === "pending-terminal";
           const actionButtonStyle = {
             flexShrink: 0,
             padding: "3px 7px",
@@ -388,24 +397,49 @@ export function SchedulesPanel({
                 <div style={{ fontSize: 12, fontWeight: 500, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2 }}>{schedule.prompt}</div>
                 <div style={{ fontSize: 11, color: "var(--text-dim)", display: "flex", gap: 10, flexWrap: "wrap" }}>
                   <span>Every {formatInterval(schedule.intervalSeconds)}</span>
-                  {schedule.enabled
-                    ? <span>{formatCountdown(schedule.nextFireAt)}</span>
-                    : <span style={{ color: "#d97706" }}>Paused</span>}
+                  {executionActive
+                    ? <span style={{ color: "var(--accent)" }}>
+                        {schedule.state === "pending-terminal"
+                          ? (schedule.enabled ? "Pending terminal" : "Pending terminal; paused")
+                          : (schedule.enabled ? "Running" : "Finishing before pause")}
+                      </span>
+                    : schedule.enabled
+                      ? <span>{formatCountdown(schedule.nextFireAt)}</span>
+                      : <span style={{ color: "#d97706" }}>Paused</span>}
                   {schedule.fireCount > 0 && <span>Fired {schedule.fireCount}×</span>}
+                  {(schedule.failureCount ?? 0) > 0 && <span style={{ color: "#dc2626" }}>Failed {schedule.failureCount}×</span>}
                   {schedule.modelId && <span style={{ color: "var(--accent)", fontSize: 10 }}>{schedule.modelId}</span>}
                   {schedule.thinkingLevel && schedule.thinkingLevel !== "auto" && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>🧠{schedule.thinkingLevel}</span>}
-                  {!schedule.sessionId && <span style={{ fontSize: 10, color: "#d97706" }}>unbound</span>}
+                  {schedule.requiresReauthorization && <span style={{ fontSize: 10, color: "#d97706" }}>needs authorization</span>}
                 </div>
+                {(schedule.lastError || schedule.pausedReason) && (
+                  <div title={schedule.lastError ?? schedule.pausedReason} style={{ marginTop: 3, fontSize: 10, color: schedule.lastError ? "#dc2626" : "#d97706", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {schedule.lastError ?? schedule.pausedReason}
+                  </div>
+                )}
               </div>
-              {!schedule.sessionId && sessionId && (
+              {schedule.requiresReauthorization && sessionId && (
                 <button type="button" onClick={() => void handleBindToCurrentSession(schedule.id)} title="Bind this schedule to the current session" style={{ ...actionButtonStyle, borderColor: "var(--accent)", color: "var(--accent)" }}>
                   Bind here
                 </button>
               )}
               {schedule.enabled ? (
-                <button type="button" onClick={() => void handleLifecycleAction(schedule.id, "pause")} disabled={actionPending} title="Pause schedule" style={actionButtonStyle}>
-                  {actionPending ? "..." : "Pause"}
-                </button>
+                <>
+                  <button type="button" onClick={() => void handleLifecycleAction(schedule.id, "pause")} disabled={actionPending} title="Pause schedule" style={actionButtonStyle}>
+                    {actionPending ? "..." : "Pause"}
+                  </button>
+                  {(schedule.state === "running" || schedule.state === "pending-terminal") && (
+                    <button type="button" onClick={() => void handleLifecycleAction(schedule.id, "cancel")} disabled={actionPending} title="Cancel the exact active run and pause future runs" style={{ ...actionButtonStyle, borderColor: "#dc2626", color: "#dc2626" }}>
+                      {actionPending ? "..." : "Cancel"}
+                    </button>
+                  )}
+                </>
+              ) : executionActive ? (
+                schedule.state === "running" || schedule.state === "pending-terminal" ? (
+                  <button type="button" onClick={() => void handleLifecycleAction(schedule.id, "cancel")} disabled={actionPending} title="Retry cancellation of the exact active run" style={{ ...actionButtonStyle, borderColor: "#dc2626", color: "#dc2626" }}>
+                    {actionPending ? "..." : "Cancel"}
+                  </button>
+                ) : <span style={{ ...actionButtonStyle, cursor: "default" }}>Finishing…</span>
               ) : (
                 <>
                   <button type="button" onClick={() => handleStartEdit(schedule)} disabled={actionPending} title="Edit paused schedule" style={actionButtonStyle}>
@@ -416,7 +450,7 @@ export function SchedulesPanel({
                   </button>
                 </>
               )}
-              <button type="button" onClick={() => void handleDelete(schedule.id)} disabled={actionPending} title="Delete schedule" style={{ flexShrink: 0, width: 26, height: 26, padding: 0, background: "none", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-dim)", cursor: actionPending ? "wait" : "pointer", opacity: actionPending ? 0.5 : 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <button type="button" onClick={() => void handleDelete(schedule.id)} disabled={actionPending || executionActive} title="Delete schedule" style={{ flexShrink: 0, width: 26, height: 26, padding: 0, background: "none", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-dim)", cursor: actionPending ? "wait" : "pointer", opacity: actionPending ? 0.5 : 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
               </button>
             </div>
