@@ -1,7 +1,16 @@
-import type { AssistantContentBlock, AssistantMessage, ThinkingContent, ToolCallContent } from "./types";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, ThinkingContent, ToolCallContent } from "./types";
 
 interface DisplayOptions {
   isStreaming?: boolean;
+}
+
+export function getThinkingPreview(thinking: string): string {
+  return thinking.trimStart().match(/^[^\r\n]{0,240}/u)?.[0].trimEnd() ?? "";
+}
+
+export function isMessageGroupAnchor(message: { role?: AgentMessage["role"]; customType?: string }): boolean {
+  return message.role === "user"
+    || (message.role === "custom" && message.customType === "compaction");
 }
 
 export function isEmptyThinkingBlock(block: AssistantContentBlock, options: DisplayOptions = {}): block is ThinkingContent {
@@ -21,6 +30,18 @@ export function getAssistantErrorMessage(
 ): string | null {
   if (options.isStreaming || message.stopReason !== "error") return null;
   return message.errorMessage?.trim() || "Unknown provider error";
+}
+
+/**
+ * A turn that ended on `stopReason: "length"` spent its whole output budget
+ * (often on reasoning alone) and produced no final answer; without a notice it
+ * looks like a hung session. The copy lives in i18n (`chat.truncatedByOutputLimit`).
+ */
+export function isAssistantTruncated(
+  message: AssistantMessage,
+  options: DisplayOptions = {},
+): boolean {
+  return !options.isStreaming && message.stopReason === "length";
 }
 
 function isFinalAnswerBlock(block: AssistantContentBlock): boolean {

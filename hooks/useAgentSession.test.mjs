@@ -72,31 +72,33 @@ test("a rejected submission preserves a different run reported by the server", (
   assert.match(reconcileSource, /if \(!agentRunningRef\.current\) return;[\s\S]*?finishPromptWithoutStream/);
 });
 
-test("opening System lazily starts a dormant session without sending a prompt", () => {
-  const loadSystemPromptSource = source.slice(
-    source.indexOf("  const loadSystemPrompt = useCallback"),
+test("opening System or Tools lazily starts a dormant session without sending a prompt", () => {
+  const loadSystemInfoSource = source.slice(
+    source.indexOf("  const loadSystemInfo = useCallback"),
     source.indexOf("  const loadSlashCommands = useCallback"),
   );
   const loaderEffectSource = source.slice(
-    source.indexOf("  useEffect(() => {\n    onSystemPromptLoaderChange"),
+    source.indexOf("  useEffect(() => {\n    onSystemInfoLoaderChange"),
     source.indexOf("  useEffect(() => {\n    if (!onBranchDataChange) return;"),
   );
 
-  assert.match(loadSystemPromptSource, /sessionIdRef\.current \?\? await ensureNewSession\(\)/);
-  assert.doesNotMatch(loadSystemPromptSource, /promoteNewSession\(\)/);
-  assert.match(loadSystemPromptSource, /sendAgentCommand<AgentStateResponse>\(sid, \{ type: "get_state" \}\)/);
-  assert.doesNotMatch(loadSystemPromptSource, /type: "prompt"/);
-  assert.match(loadSystemPromptSource, /setSystemPrompt\(state\.systemPrompt \?\? ""\)/);
-  assert.match(loaderEffectSource, /onSystemPromptLoaderChange\?\.\(loadSystemPrompt\)/);
-  assert.match(loaderEffectSource, /onSystemPromptLoaderChange\?\.\(null\)/);
-  assert.match(appShellSource, /onClick=\{\(\) => handleSystemPromptToggle\(mobile\)\}/);
-  assert.match(appShellSource, /systemPromptLoaderRef\.current/);
-  assert.doesNotMatch(appShellSource, /systemPrompt !== null \|\| systemPromptLoading/);
-  assert.match(appShellSource, /const loadId = \+\+systemPromptLoadIdRef\.current/);
-  assert.match(appShellSource, /systemPromptLoadIdRef\.current === loadId/);
+  assert.match(loadSystemInfoSource, /sessionIdRef\.current \?\? await ensureNewSession\(\)/);
+  assert.doesNotMatch(loadSystemInfoSource, /promoteNewSession\(\)/);
+  assert.match(loadSystemInfoSource, /sendAgentCommand<AgentStateResponse>\(sid, \{ type: "get_state" \}\)/);
+  assert.match(loadSystemInfoSource, /loadTools\(sid\)/);
+  assert.doesNotMatch(loadSystemInfoSource, /type: "prompt"/);
+  assert.match(loadSystemInfoSource, /setSystemPrompt\(state\.systemPrompt \?\? ""\)/);
+  assert.match(loaderEffectSource, /onSystemInfoLoaderChange\?\.\(loadSystemInfo\)/);
+  assert.match(loaderEffectSource, /onSystemInfoLoaderChange\?\.\(null\)/);
+  assert.match(appShellSource, /onClick=\{\(\) => handleSystemInfoToggle\("system", mobile\)\}/);
+  assert.match(appShellSource, /onClick=\{\(\) => handleSystemInfoToggle\("tools", mobile\)\}/);
+  assert.match(appShellSource, /systemInfoLoaderRef\.current/);
+  assert.doesNotMatch(appShellSource, /systemPrompt !== null \|\| systemInfoLoading/);
+  assert.match(appShellSource, /const loadId = \+\+systemInfoLoadIdRef\.current/);
+  assert.match(appShellSource, /systemInfoLoadIdRef\.current === loadId/);
   assert.match(
     appShellSource,
-    /handleSystemPromptLoaderChange[\s\S]*?systemPromptLoadIdRef\.current \+= 1;[\s\S]*?setSystemPromptLoading\(false\)/,
+    /handleSystemInfoLoaderChange[\s\S]*?systemInfoLoadIdRef\.current \+= 1;[\s\S]*?setSystemInfoLoading\(false\)/,
   );
 });
 
@@ -116,7 +118,7 @@ test("new-session promotion rekeys drafts before publishing the real session", (
   assert.match(chatWindowSource, /draftKey=\{session\?\.id \?\? newSessionDraftKey \?\? undefined\}/);
 });
 
-test("fresh sessions restore the preferred tool preset without overriding existing sessions", () => {
+test("fresh sessions use the preference while persisted and live sessions restore their selection", () => {
   const preferenceSource = source.slice(
     source.indexOf("  const setToolPresetState"),
     source.indexOf("  const scrollToBottom"),
@@ -132,11 +134,75 @@ test("fresh sessions restore the preferred tool preset without overriding existi
 
   assert.match(
     preferenceSource,
-    /useLayoutEffect\(\(\) => \{\s*if \(!isNew \|\| sessionIdRef\.current\) return;\s*setToolPresetState\(getPreferredToolPreset\(\)\)/,
+    /const existingSessionId = session\?\.id;[\s\S]*?useLayoutEffect\(\(\) => \{\s*if \(!existingSessionId && \(!isNew \|\| sessionIdRef\.current\)\) return;\s*setToolPresetState\(getPreferredToolPreset\(\)\)/,
   );
+  assert.match(source, /if \(agentState\?\.running\) \{\s*loadTools\(session\.id\)/);
+  assert.match(source, /d\.toolNames !== undefined \? getPresetFromToolNames\(d\.toolNames\) : "default"/);
   assert.match(changeSource, /setPreferredToolPreset\(preset\)/);
-  assert.match(changeSource, /sendAgentCommand\(sid, \{ type: "set_tools", toolNames \}\)/);
+  assert.match(changeSource, /\(sid, \{ type: "set_tools", toolNames \}\)/);
+  assert.match(changeSource, /activeSessionId !== sid \|\| result\?\.recreated/);
+  assert.match(changeSource, /result\?\.recreated[\s\S]*?maintainEventsConnected\(activeSessionId\)/);
+  assert.match(changeSource, /sessionIdRef\.current = activeSessionId/);
   assert.doesNotMatch(loadToolsSource, /setPreferredToolPreset/);
+});
+
+test("only the session-mount load probes disk for external appends", () => {
+  const loadSessionSource = source.slice(
+    source.indexOf("  const loadSession = useCallback"),
+    source.indexOf("  const loadContext = useCallback"),
+  );
+  const mountSource = source.slice(
+    source.indexOf("// Load session on mount"),
+    source.indexOf("sessionHookMountedRef.current = false"),
+  );
+  assert.match(loadSessionSource, /options\?: \{ force\?: boolean \}/);
+  assert.match(loadSessionSource, /if \(options\?\.force\) params\.set\("force", "1"\)/);
+  assert.match(loadSessionSource, /d\.wrapperRebuilt[\s\S]*?eventConnectionRef\.current\?\.close\(\)[\s\S]*?maintain\(sid\)/);
+  assert.match(mountSource, /loadSession\(session\.id, true, true, \{ force: true \}\)/);
+  assert.match(source, /await loadSession\(sid\)/);
+  assert.equal([...source.matchAll(/\{ force: true \}/g)].length, 1);
+});
+
+test("first user messages expose both branch actions and edit before their own entry", () => {
+  const navigateSource = source.slice(
+    source.indexOf("  const handleNavigate = useCallback"),
+    source.indexOf("  const handleLeafChange = useCallback"),
+  );
+
+  assert.match(chatWindowSource, /onFork=\{sessionBusy \|\| isNew \? undefined : handleFork\}/);
+  assert.doesNotMatch(chatWindowSource, /idx === 0 && msg\.role === "user"/);
+  assert.doesNotMatch(chatWindowSource, /prevAssistantEntryId/);
+  assert.match(navigateSource, /type: "navigate_tree",\s*targetId: entryId/);
+  assert.match(navigateSource, /await loadSession\(sid\)/);
+});
+
+test("an empty persisted session displays the model it will use on first send", () => {
+  assert.match(
+    source,
+    /currentModel \?\? \(data\?\.context\.messages\.length === 0 \? newSessionDefaultModel : null\)/,
+  );
+  assert.match(source, /setNewSessionDefaultModel\(displayDefaultModel/);
+});
+
+test("the selector prefers the live wrapper model over persisted response metadata", () => {
+  assert.match(source, /model\?: \{ provider: string; id: string \}/);
+  assert.match(source, /const currentModel = currentModelOverride \?\? liveModel \?\? data\?\.context\.model \?\? pendingModel \?\? null/);
+  assert.match(source, /syncLiveModel\(liveState\)/);
+  assert.match(source, /syncLiveModel\(state\);[\s\S]*?const busy = data\.running/);
+});
+
+test("existing-session prompts rely on the persisted tool selection", () => {
+  const sendSource = source.slice(
+    source.indexOf("  const handleSend = useCallback"),
+    source.indexOf("  const executeBash = useCallback"),
+  );
+  // The merged implementation shares one sendPrompt helper for new and
+  // existing sessions; verify the payload it builds.
+  const sendPromptHelper = sendSource.slice(sendSource.indexOf("const sendPrompt = async"));
+
+  assert.match(sendPromptHelper, /type: "prompt",\s*message,/);
+  assert.doesNotMatch(sendPromptHelper, /toolNames:/);
+  assert.doesNotMatch(sendSource, /restoreSubmission, toolPreset\]\);/);
 });
 
 test("submission recovery updates live refs before a possible session rekey", () => {
@@ -216,6 +282,18 @@ test("streaming submissions cannot be stranded in an idle direct queue", () => {
   assert.doesNotMatch(queueSource, /type: "follow_up"/);
 });
 
+test("built-in clone switches to the independent child session", () => {
+  const builtinSource = source.slice(
+    source.indexOf("  const handleBuiltinSlashCommand"),
+    source.indexOf("  // Let AgentSession.prompt decide atomically"),
+  );
+
+  assert.match(builtinSource, /case "clone"/);
+  assert.match(builtinSource, /type: "clone",\s+leafId: activeLeafId/);
+  assert.match(builtinSource, /agentRunningRef\.current \|\| bashRunningRef\.current/);
+  assert.match(builtinSource, /onSessionForked\?\.\(result\.newSessionId\)/);
+});
+
 test("post-accept prompt errors do not duplicate the user submission", () => {
   const promptErrorSource = source.slice(
     source.indexOf('case "prompt_error"'),
@@ -247,13 +325,35 @@ test("uses one absolute agent-readiness deadline instead of a five-second transp
   assert.doesNotMatch(source, /EVENT_STREAM_OPEN_TIMEOUT_MS/);
 });
 
-test("connects a selected session when another browser reports it running", () => {
+test("uses server pagination state instead of guessing from rendered rows", () => {
+  const loadContextSource = source.slice(
+    source.indexOf("const loadContext = useCallback"),
+    source.indexOf("const loadTools = useCallback"),
+  );
+  assert.match(source, /const \[hasEarlierMessages, setHasEarlierMessages\] = useState\(false\)/);
+  assert.match(source, /setHasEarlierMessages\(d\.context\.hasMore\)/);
+  assert.match(source, /setHistoryCursor\(d\.context\.oldestEntryId\)/);
+  assert.match(loadContextSource, /setData\(\(prev\) => \{[\s\S]*messages: \[\.\.\.d\.context\.messages, \.\.\.prev\.context\.messages\]/);
+  assert.match(chatWindowSource, /const oldestId = historyCursor/);
+  assert.doesNotMatch(chatWindowSource, /const oldestId = entryIds\[0\]/);
+  assert.match(chatWindowSource, /if \(!hasEarlierMessages\) return/);
+  assert.match(chatWindowSource, /const hasMore = startIndex > 0 \|\| hasEarlierMessages/);
+  assert.doesNotMatch(chatWindowSource, /rendered\.length >= visibleCount/);
+});
+
+test("keeps the selected session warm while idle and renews its lease", () => {
   assert.match(source, /sessionRunning\?: boolean/);
   assert.match(
     source,
-    /if \(!session\?\.id \|\| !sessionRunning\) return;[\s\S]*?maintainEventsConnected\(session\.id\)/,
+    /const sid = session\?\.id;[\s\S]*?if \(!sid\) return;[\s\S]*?maintainEventsConnected\(sid\)/,
   );
-  assert.match(source, /maintainEventsConnected\(session\.id\)/);
+  assert.match(source, /sessionPropIdRef\.current === sid/);
+  assert.match(source, /SESSION_LEASE_RENEW_INTERVAL_MS = 30_000/);
+  assert.match(source, /fetch\(`\/api\/agent\/\$\{encodeURIComponent\(sid\)\}\/lease`/);
+  assert.match(source, /setInterval\(\(\) => void renewLease\(\), SESSION_LEASE_RENEW_INTERVAL_MS\)/);
+  assert.match(source, /result\.renewed === 0[\s\S]*?closeEvents\(\)[\s\S]*?maintainEventsConnected\(sid\)/);
+  assert.match(source, /if \(sessionPropIdRef\.current === sid\) \{[\s\S]*?cancelEventStreamGrace\(\);[\s\S]*?return;/);
+  assert.match(source, /maintainEventsConnected\(sid\)/);
   assert.doesNotMatch(source, /void connectEvents\(/);
   assert.match(chatWindowSource, /sessionRunning\?: boolean/);
   assert.match(chatWindowSource, /session, sessionRunning, newSessionCwd/);
@@ -289,6 +389,16 @@ test("keeps one reducer-owned assistant partial and consumes Pi JSON deltas", ()
   assert.match(messageEndSource, /normalizeToolCalls\(completed\)/);
   assert.match(messageEndSource, /dispatch\(\{ type: "end" \}\)/);
   assert.doesNotMatch(messageEndSource, /streamState\.streamingMessage/);
+});
+
+test("restoring a running session does not clear an SSE snapshot", () => {
+  const mountSource = source.slice(
+    source.indexOf("// Load session on mount"),
+    source.indexOf("useEffect(() => {\n    onSystemPromptChange"),
+  );
+
+  assert.match(mountSource, /dispatch\(\{ type: "resume" \}\)/);
+  assert.doesNotMatch(mountSource, /dispatch\(\{ type: "start" \}\)/);
 });
 
 test("shows the latest streamed tool execution progress in the running phase", () => {
@@ -339,6 +449,24 @@ test("filters stale run epochs, targets cancellation, and aborts superseded load
   assert.match(loadSource, /signal: controller\.signal/);
 });
 
+test("reconnects active shell output to its streaming tool call", () => {
+  const updateSource = source.slice(
+    source.indexOf('case "tool_execution_update"'),
+    source.indexOf('case "tool_execution_end"'),
+  );
+  const endSource = source.slice(
+    source.indexOf('case "tool_execution_end"'),
+    source.indexOf('case "queue_update"'),
+  );
+
+  assert.match(updateSource, /name === "bash" \|\| name === "powershell"/);
+  assert.match(updateSource, /setActiveToolResults/);
+  assert.match(updateSource, /content,/);
+  assert.match(endSource, /setActiveToolResults[\s\S]*next\.delete\(id\)/);
+  assert.match(chatWindowSource, /const map = new Map\(activeToolResults\)/);
+  assert.match(chatWindowSource, /<MessageView message=\{streamState\.streamingMessage as AgentMessage\} toolResults=\{toolResultsMap\}/);
+});
+
 test("plays the enabled sound once for each extension dialog", () => {
   assert.match(chatWindowSource, /soundedExtensionDialogIdRef = useRef<string \| null>\(null\)/);
   assert.match(
@@ -347,6 +475,23 @@ test("plays the enabled sound once for each extension dialog", () => {
   );
   assert.match(chatWindowSource, /soundedExtensionDialogIdRef\.current = extensionDialog\.id/);
   assert.match(chatWindowSource, /playDoneSoundRef\.current\(\)/);
+});
+
+test("suppresses sounds and browser attention for the active subagent session", () => {
+  const completionSource = appShellSource.slice(
+    appShellSource.indexOf("  const handleAgentEnd = useCallback"),
+    appShellSource.indexOf("  const handleAttentionNeeded = useCallback"),
+  );
+  const attentionSource = appShellSource.slice(
+    appShellSource.indexOf("  const handleAttentionNeeded = useCallback"),
+    appShellSource.indexOf("  const handleAutoName = useCallback"),
+  );
+
+  assert.match(chatWindowSource, /completionNotificationsEnabled = session\?\.relation\?\.kind !== "subagent"/);
+  assert.match(chatWindowSource, /completionNotificationsEnabled && soundEnabledRef\.current/);
+  assert.match(chatWindowSource, /!completionNotificationsEnabled[\s\S]*?!extensionDialog/);
+  assert.match(completionSource, /selectedSession\?\.relation\?\.kind === "subagent"\) return/);
+  assert.match(attentionSource, /selectedSession\?\.relation\?\.kind === "subagent"\) return/);
 });
 
 test("routes blocking extension requests through deduplicated browser attention notifications", () => {
@@ -369,6 +514,8 @@ test("routes blocking extension requests through deduplicated browser attention 
   );
   assert.match(chatWindowSource, /onAttentionNeeded, onSessionCreated/);
   assert.match(completionSource, /if \(!shouldShowBrowserNotification\(\)\) return/);
+  assert.doesNotMatch(completionSource, /pushActive/);
+  assert.match(completionSource, /tag: targetSession \? `pi-session-complete:\$\{targetSession\.id\}`/);
   assert.doesNotMatch(completionSource, /document\.visibilityState === "visible"/);
   assert.match(attentionSource, /shouldShowBrowserNotification\(\)/);
   assert.match(attentionSource, /claimExtensionAttentionNotification\(request, notifiedAttentionRequestIdsRef\.current\)/);
@@ -395,13 +542,29 @@ test("keeps live following cancellable when the user scrolls away from the tail"
   assert.match(source, /const wasAttached = isNearBottomRef\.current;[\s\S]*?const isAttached = getLiveFollowAttached\([\s\S]*?wasAttached,[\s\S]*?previousScrollTopRef\.current,[\s\S]*?scrollTop,[\s\S]*?clientHeight,[\s\S]*?scrollHeight/);
   assert.match(scrollHandlerSource, /const isAgentRunning = agentRunningRef\.current;[\s\S]*?isAgentRunning\s*\? CHAT_SCROLL_REATTACH_TOLERANCE\s*:\s*CHAT_SCROLL_TAIL_TOLERANCE/);
   assert.match(source, /previousScrollTopRef\.current = scrollTop/);
-  assert.match(scrollToBottomSource, /messagesEndRef\.current\?\.scrollIntoView\(\{ behavior \}\);\s*if \(container\) previousScrollTopRef\.current = container\.scrollTop/);
+  assert.match(scrollToBottomSource, /const container = scrollContainerRef\.current;\s*if \(!container\) return;/);
+  assert.match(scrollToBottomSource, /container\.scrollTo\(\{ top: container\.scrollHeight, behavior \}\);\s*previousScrollTopRef\.current = container\.scrollTop;/);
+  assert.doesNotMatch(scrollToBottomSource, /scrollIntoView/);
   assert.match(streamUpdateSource, /liveFollowFrameRef\.current === null/);
   assert.match(streamUpdateSource, /requestAnimationFrame\(\(\) => \{[\s\S]*?liveFollowFrameRef\.current = null;[\s\S]*?if \(isNearBottomRef\.current\) scrollToBottom\("auto"\)/);
   assert.match(scrollHandlerSource, /!wasAttached && isAttached && isAgentRunning[\s\S]*?scrollToBottom\("auto"\)/);
   assert.match(scrollHandlerSource, /cancelAnimationFrame\(liveFollowFrameRef\.current\)/);
   assert.match(source, /previousScrollTopRef\.current = container\.scrollTop;\s*container\.addEventListener\("scroll", handleScrollPositionChange/);
   assert.doesNotMatch(source, /SCROLL_BOTTOM_THRESHOLD|completionScrollAllowedRef|ignoreProgrammaticScrollUntilRef/);
+});
+
+test("restores an in-page session viewport without the default tail jump", () => {
+  assert.match(source, /const initialScrollDoneRef = useRef\(Boolean\(opts\.deferInitialScroll\)\)/);
+  assert.match(source, /const scrollToMessage = useCallback\(\(element: HTMLElement, viewportOffset = 16\)/);
+  assert.match(source, /container\.scrollTop\s+- viewportOffset/);
+  assert.match(chatWindowSource, /deferInitialScroll: Boolean\(pendingScrollRestore\)/);
+  assert.match(chatWindowSource, /isScrollAtTail\(container\.scrollTop, container\.clientHeight, container\.scrollHeight\)/);
+  assert.match(chatWindowSource, /findChatScrollAnchor\(/);
+  assert.match(chatWindowSource, /while \(hasMore && before && !controller\.signal\.aborted\)/);
+  assert.match(chatWindowSource, /context\.oldestEntryId === position\.oldestEntryId/);
+  assert.match(chatWindowSource, /if \(!context\) \{\s*scrollToBottom\("instant"\);\s*setPendingScrollRestore\(null\);/);
+  assert.match(chatWindowSource, /scrollToMessage\(element, position\.anchorOffset\)/);
+  assert.match(chatWindowSource, /visibility: pendingScrollRestore \? "hidden" : undefined/);
 });
 
 test("keeps a newly sent user message at the top while its response starts", () => {
@@ -465,11 +628,11 @@ test("keeps prompt anchor measurement outside the React update cycle", () => {
   assert.match(anchorLifecycleEffectSource, /promptAnchorMeasureFrameRef\.current = requestAnimationFrame\(\(\) => \{\s*promptAnchorMeasureFrameRef\.current = null;\s*updatePromptAnchorSpacer\(\)/);
   assert.match(anchorLifecycleEffectSource, /disposed = true;[\s\S]*?promptAnchorUpdateRef\.current === updatePromptAnchorSpacer[\s\S]*?cancelAnimationFrame\(promptAnchorMeasureFrameRef\.current\)/);
   assert.match(anchorSyncEffectSource, /promptAnchorUpdateRef\.current\?\.\(\);\s*\}, \[streamState\.streamingMessage\]\)/);
-  assert.match(chatWindowSource, /<div ref=\{messageContentRef\} style=\{\{/);
+  assert.match(chatWindowSource, /<div ref=\{messageContentRef\}[^>]*style=\{\{/);
 });
 
 test("uses the prompt anchor as the only trailing message spacer", () => {
-  assert.match(chatWindowSource, /<div ref=\{promptAnchorSpacerRef\} aria-hidden="true" \/>[\s\S]*?<div ref=\{messagesEndRef\} \/>/);
+  assert.match(chatWindowSource, /<div ref=\{promptAnchorSpacerRef\} aria-hidden="true" \/>[\s\S]*?<\/div>/);
   assert.doesNotMatch(chatWindowSource, /bottomComposer(?:Ref|Height|ScrollFrameRef)/);
   assert.doesNotMatch(chatWindowSource, /new ResizeObserver\(updateBottomComposerHeight\)/);
 });
@@ -483,4 +646,20 @@ test("keeps a detached viewport in place when streaming completes", () => {
   assert.match(scrollEffectSource, /!agentRunningRef\.current && isNearBottomRef\.current[\s\S]*?scrollToBottom\("auto"\)/);
   assert.doesNotMatch(scrollEffectSource, /\|\|/);
   assert.match(source, /addEventListener\("scroll", handleScrollPositionChange/);
+});
+
+test("auto-compact slash command toggles session auto-compaction", () => {
+  const commandSource = source.slice(
+    source.indexOf('case "auto-compact"'),
+    source.indexOf('case "reload"'),
+  );
+  assert.ok(commandSource.length > 0, "auto-compact case not found before reload case");
+  assert.match(commandSource, /sendAgentCommand<AgentStateResponse>\(sid, \{\s*type: "get_state"\s*\}\)/);
+  assert.match(commandSource, /!\(liveState\?\.autoCompactionEnabled \?\? true\)/);
+  assert.match(commandSource, /sendAgentCommand\(sid, \{\s*type: "set_auto_compaction",\s*enabled: nextEnabled,\s*\}\)/);
+  assert.match(commandSource, /setAutoCompactionEnabled\(nextEnabled\)/);
+  assert.doesNotMatch(commandSource, /!autoCompactionEnabled/);
+  // State mirrors the wrapper so the toggle reflects server-side changes too.
+  assert.match(source, /setAutoCompactionEnabled\(state\?\.autoCompactionEnabled \?\? true\)/);
+  assert.match(source, /setAutoCompactionEnabled\(liveState\.autoCompactionEnabled \?\? true\)/);
 });

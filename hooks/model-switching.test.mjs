@@ -32,6 +32,7 @@ test("session reloads cannot clear an in-flight optimistic model", () => {
 
 test("a completed model switch reloads canonical session state and reports failures", () => {
   assert.match(switchSource, /modelSwitchPendingRef\.current = false;\s*await loadSession\(sid\)/);
+  assert.match(switchSource, /setCurrentModelOverride\(previousOverride\)[\s\S]*?await loadSession\(sid, false, true\)/);
   assert.match(switchSource, /setCurrentModelOverride\(previousOverride\)/);
   assert.match(switchSource, /Failed to switch model:/);
 });
@@ -40,5 +41,5 @@ test("model changes report whether the agent accepted them", () => {
   assert.match(switchSource, /const handleModelChange = useCallback\(async \(provider: string, modelId: string\): Promise<boolean>/);
   assert.match(switchSource, /if \(!sid \|\| modelSwitchPendingRef\.current\) return false/);
   assert.match(switchSource, /await loadSession\(sid\);\s*return true/);
-  assert.match(switchSource, /await loadSession\(sid\);\s*return false/);
+  assert.match(switchSource, /await loadSession\(sid, false, true\);\s*return false/);
 });

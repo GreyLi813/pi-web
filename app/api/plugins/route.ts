@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { existsSync, readFileSync, statSync } from "fs";
-import { basename, dirname, extname, join, relative } from "path";
+import { basename, dirname, extname, join, relative, sep } from "node:path";
 import {
   DefaultPackageManager,
   getAgentDir,
@@ -12,6 +12,7 @@ import {
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { getProjectTrustStatus } from "@/lib/project-trust";
+import { isPluginSourceCheckable } from "@/lib/plugin-updates";
 import type {
   PluginDiagnostic,
   PluginPackageInfo,
@@ -19,6 +20,7 @@ import type {
   PluginResourceInfo,
   PluginResourceKind,
   PluginScope,
+  PluginStandaloneExtensionInfo,
   PluginsResponse,
 } from "@/lib/api-types";
 
@@ -112,7 +114,18 @@ function getRelativePath(resource: ResolvedResource): string {
   const baseDir = resource.metadata.baseDir;
   if (!baseDir) return resource.path;
   const rel = relative(baseDir, resource.path);
-  return rel && !rel.startsWith("..") ? rel : resource.path;
+  // Normalize to forward slashes so API output is stable across platforms
+  // (Node's path.relative returns backslashes on Windows).
+  return rel && !rel.startsWith("..") ? rel.split(sep).join("/") : resource.path;
+}
+
+function toResourceInfo(resource: ResolvedResource, kind: PluginResourceKind): PluginResourceInfo {
+  return {
+    kind,
+    name: getResourceName(resource.path, kind),
+    path: resource.path,
+    relativePath: getRelativePath(resource),
+  };
 }
 
 function getConfiguredVersion(source: string): string | undefined {
@@ -133,7 +146,7 @@ function getConfiguredVersion(source: string): string | undefined {
   return undefined;
 }
 
-function readPackageMetadata(installedPath?: string): { packageName?: string; version?: string } {
+function readPackageMetadata(installedPath?: string): { packageName?: string; version?: string; description?: string } {
   if (!installedPath) return {};
   try {
     const stats = statSync(installedPath);
@@ -144,10 +157,12 @@ function readPackageMetadata(installedPath?: string): { packageName?: string; ve
     const parsed = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
       name?: unknown;
       version?: unknown;
+      description?: unknown;
     };
     return {
       packageName: typeof parsed.name === "string" ? parsed.name : undefined,
       version: typeof parsed.version === "string" ? parsed.version : undefined,
+      description: typeof parsed.description === "string" ? parsed.description : undefined,
     };
   } catch {
     return {};
@@ -177,18 +192,14 @@ function collectResource(
       : kind === "prompts"
         ? "prompt"
         : "theme";
-  resources.push({
-    kind: resourceKind,
-    name: getResourceName(resource.path, resourceKind),
-    path: resource.path,
-    relativePath: getRelativePath(resource),
-  });
+  resources.push(toResourceInfo(resource, resourceKind));
   resourcesByPackage.set(key, resources);
 }
 
 function collectResources(paths: ResolvedPaths): {
   countsByPackage: Map<string, PluginResourceCounts>;
   resourcesByPackage: Map<string, PluginResourceInfo[]>;
+  standaloneExtensions: PluginStandaloneExtensionInfo[];
   totals: PluginResourceCounts;
 } {
   const countsByPackage = new Map<string, PluginResourceCounts>();
@@ -198,7 +209,16 @@ function collectResources(paths: ResolvedPaths): {
   for (const resource of paths.skills) collectResource(resource, "skills", countsByPackage, resourcesByPackage, totals);
   for (const resource of paths.prompts) collectResource(resource, "prompts", countsByPackage, resourcesByPackage, totals);
   for (const resource of paths.themes) collectResource(resource, "themes", countsByPackage, resourcesByPackage, totals);
-  return { countsByPackage, resourcesByPackage, totals };
+  const standaloneExtensions = paths.extensions
+    .filter((resource) => resource.metadata.origin === "top-level")
+    .map((resource): PluginStandaloneExtensionInfo => ({
+      ...toResourceInfo(resource, "extension"),
+      kind: "extension",
+      scope: toPluginScope(resource.metadata.scope),
+      enabled: resource.enabled,
+    }));
+  totals.extensions += standaloneExtensions.filter((extension) => extension.enabled).length;
+  return { countsByPackage, resourcesByPackage, standaloneExtensions, totals };
 }
 
 async function readPlugins(cwd: string): Promise<PluginsResponse> {
@@ -216,6 +236,7 @@ async function readPlugins(cwd: string): Promise<PluginsResponse> {
   const diagnostics: PluginDiagnostic[] = [];
   let countsByPackage = new Map<string, PluginResourceCounts>();
   let resourcesByPackage = new Map<string, PluginResourceInfo[]>();
+  let standaloneExtensions: PluginStandaloneExtensionInfo[] = [];
   let totals = emptyCounts();
   const disabledByPackage = getDisabledPackages(settingsManager);
 
@@ -228,7 +249,7 @@ async function readPlugins(cwd: string): Promise<PluginsResponse> {
       });
       return "skip";
     });
-    ({ countsByPackage, resourcesByPackage, totals } = collectResources(resolved));
+    ({ countsByPackage, resourcesByPackage, standaloneExtensions, totals } = collectResources(resolved));
   } catch (error) {
     diagnostics.push({
       type: "error",
@@ -254,12 +275,14 @@ async function readPlugins(cwd: string): Promise<PluginsResponse> {
     return {
       source: pkg.source,
       scope,
+      canCheckForUpdates: isPluginSourceCheckable(pkg.source),
       filtered: pkg.filtered,
       disabled,
       installedPath: pkg.installedPath,
       packageName: packageMetadata.packageName,
       version: packageMetadata.version,
       configuredVersion: getConfiguredVersion(pkg.source),
+      description: packageMetadata.description,
       counts,
       resources,
       status: disabled ? "disabled" : resourceCount > 0 ? "loaded" : pkg.installedPath ? "installed" : "missing",
@@ -268,6 +291,7 @@ async function readPlugins(cwd: string): Promise<PluginsResponse> {
 
   return {
     packages,
+    standaloneExtensions,
     totals,
     diagnostics,
     projectResourcesLoaded: projectTrust.trusted,
@@ -344,6 +368,12 @@ export async function POST(req: Request) {
       if (!source) return NextResponse.json({ error: "source required" }, { status: 400 });
       await packageManager.removeAndPersist(source, { local });
     } else if (body.action === "update") {
+      if (!source && !projectTrust.trusted && packageManager.listConfiguredPackages().some((pkg) => pkg.scope === "project")) {
+        return NextResponse.json(
+          { error: "Project resources must be trusted before updating project plugins" },
+          { status: 403 },
+        );
+      }
       await packageManager.update(source);
     } else if (body.action === "disable") {
       if (!source) return NextResponse.json({ error: "source required" }, { status: 400 });

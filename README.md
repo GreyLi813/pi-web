@@ -14,7 +14,7 @@ Local browser UI for the [pi coding agent](https://github.com/earendil-works/pi)
 - **Git worktrees**: switch checkouts from the sidebar while keeping sessions from the same repository grouped together.
 - **Orchestrated worker sessions**: a controller session creates and drives clean, persisted sessions for unbiased review, validation, or delegated work; run bounded independent tasks in parallel and continue any worker later by Session ID.
 - **Web-based configuration**: manage provider login and API keys, models, model tests, plugin packages, and skills without leaving Pi Web.
-- **English and Simplified Chinese UI**: Pi Web follows the browser language initially and provides a language switcher in the top bar.
+- **English, Simplified Chinese, and Traditional Chinese UI**: Pi Web follows the browser language initially and provides a language switcher in the top bar.
 
 ## Quick Start
 
@@ -39,19 +39,23 @@ To update, stop the running process with `Ctrl+C` and run the same install comma
 
 ## Configuration
 
-For port and hostname, command-line options override the corresponding environment variables. Either `--no-open` or `PI_WEB_NO_OPEN=1` disables automatic browser opening.
+For port and hostname, command-line options override the corresponding environment variables. Either `--no-open` or `PI_WEB_NO_OPEN=1` disables automatic browser opening. Run `pi-web --help` (or `-h`) to print startup options and exit without starting the server. Unknown options exit with an error.
 
 | Option or environment variable | Purpose | Default |
 | --- | --- | --- |
+| `--help`, `-h` | Print startup options and exit | — |
 | `--port <port>`, `-p <port>`, or `PORT` | Server port | `30141` |
 | `--hostname <host>`, `-H <host>`, or `PI_WEB_HOSTNAME` | Bind hostname | `127.0.0.1` |
 | `--no-open` or `PI_WEB_NO_OPEN=1` | Do not open a browser automatically | Browser opens |
+| `PI_WEB_SKIP_VERSION_CHECK=1` | Disable Pi Web update checks | Unset |
 | `PI_WEB_ALLOWED_HOSTS` | Additional exact proxy or custom hostnames, comma-separated | Unset |
-| `PI_WEB_PASSWORD` | Enable HTTP Basic Auth; the username is always `pi` | Authentication disabled |
+| `PI_WEB_PASSWORD` | Enable browser password login; API clients may use Basic Auth with username `pi` | Authentication disabled |
+| `PI_WEB_IDLE_TIMEOUT_MS` | Session idle timeout in milliseconds, up to `2147483647`; `0` disables idle shutdown; invalid or out-of-range values use the default | `600000` (10 min) |
 
 For example:
 
 ```bash
+pi-web --help
 pi-web -p 8080 -H 0.0.0.0 --no-open
 ```
 
@@ -63,7 +67,7 @@ Binding to a non-loopback address exposes an agent that can execute high-privile
 PI_WEB_PASSWORD='a-long-random-password' pi-web --hostname 0.0.0.0
 ```
 
-Basic Auth does not encrypt the password in transit. Do not expose Pi Web over plain HTTP to the internet; use HTTPS through a trusted reverse proxy or a trusted VPN. If a reverse proxy sends an external hostname, add that exact name to `PI_WEB_ALLOWED_HOSTS`. This allow-list does not change the address Pi Web binds to.
+Password authentication does not encrypt the connection. Do not expose Pi Web over plain HTTP to the internet; use HTTPS through a trusted reverse proxy or a trusted VPN. If a reverse proxy sends an external hostname, add that exact name to `PI_WEB_ALLOWED_HOSTS`. This allow-list does not change the address Pi Web binds to.
 
 ### HTTP Proxy
 
@@ -121,6 +125,30 @@ coordinates, and a `refresh()` callback for actions that change the session
 list. If no listener cancels the extension event, Pi Web preserves the
 browser's native context menu. This hook is browser-side and independent of
 Pi agent extensions.
+
+### Extension Session Liveness
+
+Server-side Pi extensions with detached work can prevent automatic idle
+session eviction through the versioned global registry:
+
+```js
+const liveness = globalThis[Symbol.for("@agegr/pi-web/session-liveness/v1")];
+const release = liveness?.version === 1
+  ? liveness.register({
+      name: "my-extension",
+      sessionId,
+      sessionFile: sessionFile || undefined,
+      isActive: () => detachedJobs.size > 0,
+    })
+  : () => {};
+```
+
+Register once per active extension session and call the returned idempotent
+`release` function on session shutdown, replacement, or reload. `isActive`
+must be synchronous, cheap, and scoped to the supplied exact session id or
+file. Provider errors fail safe by preserving that session. This lease only
+affects automatic idle eviction; explicit shutdown and Stop fallback cleanup
+still take precedence.
 
 ## Development
 

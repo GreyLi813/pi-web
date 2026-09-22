@@ -11,6 +11,8 @@ import {
   normalizeFilePathSlashes,
 } from "@/lib/file-paths";
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
+import type { FileIndexEntry } from "@/lib/file-fuzzy";
+import { buildSearchTree, type SearchTreeNode } from "@/lib/search-tree";
 import { useI18n } from "@/hooks/useI18n";
 type Translate = ReturnType<typeof useI18n>["t"];
 
@@ -39,6 +41,8 @@ interface Props {
   onUploadBusyChange?: (busy: boolean) => void;
   changesCollapsed: boolean;
   onChangesCountChange?: (count: number) => void;
+  fileSearchOpen?: boolean;
+  onFileSearchOpenChange?: (open: boolean) => void;
 }
 
 export interface FileExplorerHandle {
@@ -230,7 +234,7 @@ function TreeNode({
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   expandedPaths: Set<string>;
   onToggleExpanded: (fullPath: string, open: boolean) => void;
-  refreshToken: string;
+  refreshToken?: string;
   highlightedPaths: Set<string>;
   gitStatusByPath: Map<string, GitFileStatus>;
   changedDirectoryPaths: Set<string>;
@@ -264,7 +268,7 @@ function TreeNode({
 
   // Re-fetch children when the tree refreshes and the directory is open.
   useEffect(() => {
-    if (open && loaded) {
+    if (refreshToken !== undefined && open && loaded) {
       loadChildren(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -465,16 +469,22 @@ function ChangeRow({
   status,
   cwd,
   onOpenFile,
+  onAtMention,
   t,
 }: {
   status: GitFileStatus;
   cwd: string;
   onOpenFile: OpenFileHandler;
+  onAtMention?: (relativePath: string, isDir: boolean) => void;
   t: Translate;
 }) {
   const [hovered, setHovered] = useState(false);
   const name = getFileName(status.filePath);
   const rel = getRelativeFilePath(status.filePath, cwd);
+  // Split the path so the directory part ellipsizes while the file name stays fully visible
+  const lastSlash = rel.lastIndexOf("/");
+  const dirPart = lastSlash >= 0 ? rel.slice(0, lastSlash + 1) : "";
+  const baseName = lastSlash >= 0 ? rel.slice(lastSlash + 1) : rel;
   return (
     <div
       onClick={() => onOpenFile(status.filePath, name, { modeHint: "diff" })}
@@ -492,6 +502,7 @@ function ChangeRow({
         background: hovered ? "var(--bg-hover)" : "transparent",
         borderRadius: 4,
         userSelect: "none",
+        position: "relative",
       }}
     >
       <GitStatusBadge status={status} t={t} />
@@ -499,17 +510,74 @@ function ChangeRow({
         {getFileIcon(name, 13)}
       </span>
       <span
+        title={status.filePath}
         style={{
           fontSize: 12,
           color: "var(--text)",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
+          display: "flex",
+          alignItems: "center",
+          minWidth: 0,
           flex: 1,
         }}
       >
-        {rel}
+        {dirPart && (
+          <span
+            style={{
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              flex: "0 1 auto",
+              minWidth: 0,
+              color: "var(--text-dim)",
+            }}
+          >
+            {dirPart}
+          </span>
+        )}
+        <span
+          style={{
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            flexShrink: 0,
+            maxWidth: "100%",
+          }}
+        >
+          {baseName}
+        </span>
       </span>
+      {onAtMention && hovered && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onAtMention(rel, false);
+          }}
+          title={t("files.insertPath")}
+          style={{
+            position: "absolute",
+            right: 4,
+            top: "50%",
+            transform: "translateY(-50%)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 4,
+            padding: "0 8px",
+            height: 20,
+            background: "var(--bg-panel)",
+            border: "1px solid var(--border)",
+            borderRadius: 4,
+            color: "var(--accent)",
+            cursor: "pointer",
+            fontSize: 11,
+            fontWeight: 600,
+            whiteSpace: "nowrap",
+          }}
+        >
+          <MentionIcon />
+          {t("files.mention")}
+        </button>
+      )}
     </div>
   );
 }
@@ -523,6 +591,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   onUploadBusyChange,
   changesCollapsed,
   onChangesCountChange,
+  fileSearchOpen = false,
+  onFileSearchOpenChange,
 }, ref) {
   const { t } = useI18n();
   const [roots, setRoots] = useState<FileNode[]>([]);
@@ -538,10 +608,85 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<UploadSummary | null>(null);
   const [pendingConflict, setPendingConflict] = useState<PendingConflict | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchPaths, setSearchPaths] = useState<string[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState(false);
+  const [searchExpanded, setSearchExpanded] = useState<Set<string>>(new Set());
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
   const uploadBusy = uploadPhase !== "idle";
+  const hasSearchQuery = searchQuery.trim().length > 0;
+
+  // Reuse the cached, bounded file index used by @ mentions.
+  useEffect(() => {
+    if (!fileSearchOpen) return;
+    const query = searchQuery.trim();
+    if (!query) {
+      setSearchPaths([]);
+      setSearchLoading(false);
+      setSearchError(false);
+      return;
+    }
+    const controller = new AbortController();
+    setSearchLoading(true);
+    setSearchError(false);
+    const timer = setTimeout(() => {
+      fetch(`/api/file-index?cwd=${encodeURIComponent(cwd)}&q=${encodeURIComponent(query)}`, { signal: controller.signal })
+        .then((response) => response.ok ? response.json() as Promise<{ matches?: FileIndexEntry[] }> : Promise.reject(new Error("Search failed")))
+        .then((data) => setSearchPaths((data.matches ?? []).filter((entry) => !entry.isDir).map((entry) => entry.path)))
+        .catch(() => {
+          if (!controller.signal.aborted) {
+            setSearchPaths([]);
+            setSearchError(true);
+          }
+        })
+        .finally(() => { if (!controller.signal.aborted) setSearchLoading(false); });
+    }, 150);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [cwd, fileSearchOpen, searchQuery]);
+
+  // Focus the search input whenever the search panel opens.
+  useEffect(() => {
+    if (fileSearchOpen) searchInputRef.current?.focus();
+  }, [fileSearchOpen]);
+
+  // Results render as a tree; keep every directory that contains a match
+  // expanded, while preserving the user's manual collapses as they type.
+  useEffect(() => {
+    if (searchPaths.length === 0) return;
+    const dirs = new Set<string>();
+    for (const relative of searchPaths) {
+      const parts = relative.split("/");
+      let path = "";
+      for (let i = 0; i < parts.length - 1; i++) {
+        path = path ? `${path}/${parts[i]}` : parts[i];
+        dirs.add(joinFilePath(cwd, path));
+      }
+    }
+    setSearchExpanded((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const dir of dirs) {
+        if (!next.has(dir)) { next.add(dir); changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  }, [cwd, searchPaths]);
+
+  const searchRoots = useMemo(() => {
+    const toFileNode = (node: SearchTreeNode): FileNode => ({
+      name: node.name,
+      fullPath: joinFilePath(cwd, node.path),
+      isDir: node.isDir,
+      size: 0,
+      children: node.children.map(toFileNode),
+      loaded: true,
+    });
+    return buildSearchTree(searchPaths).map(toFileNode);
+  }, [cwd, searchPaths]);
 
   const gitStatusByPath = useMemo(() => new Map(
     gitFiles.map((status) => [normalizeFilePathSlashes(status.filePath), status]),
@@ -847,6 +992,73 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         </div>
       )}
 
+      {fileSearchOpen && (
+      <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)" }}>
+        <div style={{ position: "relative" }}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", color: "var(--text-dim)", pointerEvents: "none" }}>
+            <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
+          </svg>
+          <input
+            ref={searchInputRef}
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            onKeyDown={(event) => { if (event.key === "Escape") onFileSearchOpenChange?.(false); }}
+            placeholder={t("sidebar.searchFilesPlaceholder")}
+            aria-label={t("sidebar.searchFiles")}
+            style={{ width: "100%", boxSizing: "border-box", padding: "6px 24px", border: "1px solid var(--border)", borderRadius: 5, outline: "none", background: "var(--bg)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }}
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery("")}
+              title={t("sidebar.clearSearch")}
+              aria-label={t("sidebar.clearSearch")}
+              style={{ position: "absolute", right: 4, top: "50%", transform: "translateY(-50%)", display: "flex", alignItems: "center", justifyContent: "center", width: 18, height: 18, padding: 0, border: "none", borderRadius: 4, background: "none", color: "var(--text-dim)", cursor: "pointer" }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-dim)"; }}
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M18 6 6 18" /><path d="m6 6 12 12" />
+              </svg>
+            </button>
+          )}
+        </div>
+        {hasSearchQuery && (
+          <div style={{ paddingTop: 3 }}>
+            {searchLoading && <div role="status" style={{ padding: "6px 2px", fontSize: 10, color: "var(--text-dim)" }}>{t("sidebar.searchingFiles")}</div>}
+            {!searchLoading && searchError && <div role="alert" style={{ padding: "6px 2px", fontSize: 10, color: "#f87171" }}>{t("i18n.networkError")}</div>}
+            {!searchLoading && !searchError && searchPaths.length === 0 && <div style={{ padding: "6px 2px", fontSize: 10, color: "var(--text-dim)" }}>{t("sidebar.noMatchingFiles")}</div>}
+            {!searchLoading && !searchError && searchPaths.length > 0 && (
+              <div>
+                {searchRoots.map((node) => (
+                  <TreeNode
+                    key={`${searchQuery}:${node.fullPath}`}
+                    node={node}
+                    depth={0}
+                    cwd={cwd}
+                    onOpenFile={onOpenFile}
+                    onAtMention={onAtMention}
+                    expandedPaths={searchExpanded}
+                    onToggleExpanded={(fullPath, open) => {
+                      setSearchExpanded((prev) => {
+                        const next = new Set(prev);
+                        if (open) next.add(fullPath); else next.delete(fullPath);
+                        return next;
+                      });
+                    }}
+                    highlightedPaths={highlightedPaths}
+                    gitStatusByPath={gitStatusByPath}
+                    changedDirectoryPaths={changedDirectoryPaths}
+                    t={t}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      )}
+
       {!changesCollapsed && gitFiles.length > 0 && (
         <div style={{ padding: "0 4px 2px" }}>
           <div
@@ -864,12 +1076,19 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
             <span style={{ color: GIT_STATUS_COLORS.deleted, fontFamily: "var(--font-mono)" }}>-{gitLineStats.deletions}</span>
           </div>
           {gitFiles.map((status) => (
-            <ChangeRow key={status.filePath} status={status} cwd={cwd} onOpenFile={onOpenFile} t={t} />
+            <ChangeRow
+              key={status.filePath}
+              status={status}
+              cwd={cwd}
+              onOpenFile={onOpenFile}
+              onAtMention={onAtMention}
+              t={t}
+            />
           ))}
         </div>
       )}
 
-      {(changesCollapsed || gitFiles.length === 0) && (
+      {(changesCollapsed || gitFiles.length === 0) && (!fileSearchOpen || !hasSearchQuery) && (
         <div style={{ padding: "2px 4px" }}>
           {loading ? (
             <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>Loading files...</div>
