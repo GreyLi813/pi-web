@@ -9,7 +9,6 @@ import {
   type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike } from "./pi-types";
-import { withTranscriptSystemPrompt } from "./agent-system-prompt";
 import {
   subagentNotificationText,
   subagentToolDetails,
@@ -528,20 +527,7 @@ export function createSubagentController(
         let result: SubagentRunInfo;
         try {
           await prepareChildMcp(childSession, stored);
-          await inner.prompt(delegatedTask, {
-            source: "rpc",
-            ...(chatOnly
-              ? {
-                  preflightResult: (disposition) => {
-                    // Only a started run replays the profile prompt into the transcript.
-                    // A queued or handled input starts no run, so its transcript must stay untouched.
-                    if (disposition === "started" && inner.agent.state) {
-                      inner.agent.state.messages = withTranscriptSystemPrompt(inner.agent.state.messages, profile.systemPrompt);
-                    }
-                  },
-                }
-              : {}),
-          });
+          await inner.prompt(delegatedTask, { source: "rpc" });
           const text = inner.getLastAssistantText()?.trim();
           const stop = stored.abortRequested ? undefined : lastAssistantStop(sessionManager);
           const aborted = stored.abortRequested || stop?.aborted === true;

@@ -468,8 +468,11 @@ export class AgentSessionWrapper {
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
     this.mcpHost = options.mcpHost;
     this.chatOnlyExtensionModel = options.chatOnlyExtensionModel;
-    this.installExactSystemPromptContinuation();
-    this.applyExactSystemPrompt();
+    // An exact system prompt reaches the model through the inline `before_agent_start`
+    // handler (lib/exact-system-prompt.ts) that the session's resource loader registers,
+    // and the transcript keeps recording Pi's structured sections. Since Pi 0.86 the
+    // SDK prompt state is a getter replayed from those messages, so the wrapper must
+    // neither assign it nor patch the agent's turn hooks.
   }
 
   get sessionId(): string {
@@ -767,7 +770,6 @@ export class AgentSessionWrapper {
     if (options.forceEmptySystemPrompt) this.forceEmptySystemPrompt = true;
     if (this.extensionsBound) {
       this.applyForcedEmptySystemPrompt();
-      this.applyExactSystemPrompt();
       return Promise.resolve();
     }
     if (this.extensionBindingPromise) return this.extensionBindingPromise;
@@ -807,7 +809,6 @@ export class AgentSessionWrapper {
       }
       this.extensionsBound = true;
       this.applyForcedEmptySystemPrompt();
-      this.applyExactSystemPrompt();
       console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
     })().catch((err) => {
       this.extensionBindingError = err;
@@ -883,27 +884,6 @@ export class AgentSessionWrapper {
     } finally {
       this.resetIdleTimer();
     }
-  }
-
-  private applyExactSystemPrompt(): void {
-    if (!this.exactSystemPrompt || !this.inner.agent.state) return;
-    this.inner.agent.state.messages = withTranscriptSystemPrompt(this.inner.agent.state.messages, this.exactSystemPrompt());
-  }
-
-  private installExactSystemPromptContinuation(): void {
-    if (!this.exactSystemPrompt) return;
-    const previous = this.inner.agent.prepareNextTurnWithContext;
-    this.inner.agent.prepareNextTurnWithContext = async (turn, signal) => {
-      const prepared = await previous?.(turn, signal);
-      const context = prepared?.context ?? turn.context;
-      return {
-        ...prepared,
-        context: {
-          ...context,
-          messages: withTranscriptSystemPrompt(context.messages, this.exactSystemPrompt!()),
-        },
-      };
-    };
   }
 
   /** Apply a coding tool selection; `carry` defaults to the tools active now. */
@@ -983,7 +963,7 @@ export class AgentSessionWrapper {
     this.idleTimer = setTimeout(() => {
       // A visible chat keeps an SSE listener attached so server-dispatched
       // schedules can stream into that page even after a long idle period.
-      if (!this.forceShutdownOnIdle && (this.isRunning() || this.listeners.length > 0 || hasActiveSessionLivenessProvider({
+      if (!this.forceShutdownOnIdle && (this.isRunning() || this.listeners.size > 0 || hasActiveSessionLivenessProvider({
         sessionId: this.sessionId,
         sessionFile: this.sessionFile || undefined,
       }))) {
@@ -1531,9 +1511,6 @@ export class AgentSessionWrapper {
               source: "rpc",
               preflightResult: (disposition) => {
                 preflightDisposition = disposition;
-                // The transcript's system prompt must be exact for every later request,
-                // including the one that eventually drains a queued steer, so always reapply it.
-                this.applyExactSystemPrompt();
                 // Only "started" begins a run that ends with agent_settled.
                 if (disposition === "started") {
                   acceptPreflight();
@@ -3831,22 +3808,6 @@ export async function startRpcSession(
         ...(peerStartupPolicy ? { peerSessionRuntime: options.peerSessionRuntime } : {}),
         ...(!orchestrationPolicy && sessionLease ? { sessionFileRuntime: sessionLease } : {}),
       });
-
-      const persistedPreferences = await persistExplicitStartupPreferences(
-        services.settingsManager,
-        {
-          ...(effectiveInitialModel ? { model: effectiveInitialModel } : {}),
-          ...(thinkingLevel ? { thinkingLevel } : {}),
-        },
-        {
-          ...(inner.model
-            ? { model: { provider: inner.model.provider, modelId: inner.model.id } }
-            : {}),
-          thinkingLevel: inner.thinkingLevel,
-          supportsThinking: inner.supportsThinking(),
-        },
-      );
-      if (persistedPreferences.modelDefaultChanged) invalidateModelsCache();
 
       // A pinned selection replaces only the coding tools of the SDK's initial loadout, which
       // already holds the extension tools pi activates on registration and whatever

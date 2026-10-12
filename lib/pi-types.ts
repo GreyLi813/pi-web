@@ -1,5 +1,5 @@
-import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
-import type { Api, Message, Model } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import type {
   AgentSessionEvent,
   BashOperations,
