@@ -6,13 +6,14 @@ import { formatRelativeTime } from "@/lib/i18n/format";
 import type { SessionInfo } from "@/lib/types";
 import type { SessionSearchResponse } from "@/lib/session-search";
 
-export function SessionSearch({ open, query, refreshKey, children, selectedSessionId, onSelectSession }: {
+export function SessionSearch({ open, query, children, selectedSessionId, onSelectSession, archivedSessionIds }: {
   open: boolean;
   query: string;
-  refreshKey: number | null;
   children: ReactNode;
   selectedSessionId: string | null;
   onSelectSession: (session: SessionInfo, entryId?: string, blockIndex?: number) => void;
+  /** Ids of every session in an archived family: their results are tagged, not hidden. */
+  archivedSessionIds?: ReadonlySet<string>;
 }) {
   const { t, locale } = useI18n();
   const [state, setState] = useState<{ query: string; response?: SessionSearchResponse; failed?: boolean }>({ query: "" });
@@ -20,6 +21,10 @@ export function SessionSearch({ open, query, refreshKey, children, selectedSessi
   const response = state.query === search ? state.response : undefined;
   const failed = state.query === search && state.failed;
 
+  // Re-runs only when the query changes. It deliberately does not depend on the
+  // session-list version: ordinary agent activity bumps that version every few
+  // seconds, which used to refetch (and re-order) results while they were being
+  // read.
   useEffect(() => {
     if (!open || !search) return;
     const controller = new AbortController();
@@ -38,7 +43,7 @@ export function SessionSearch({ open, query, refreshKey, children, selectedSessi
       clearTimeout(timer);
       controller.abort();
     };
-  }, [open, search, refreshKey]);
+  }, [open, search]);
 
   return !open || !search ? children : (
     <div className="min-h-20 flex-1 overflow-y-auto" aria-busy={!response && !failed}>
@@ -58,7 +63,12 @@ export function SessionSearch({ open, query, refreshKey, children, selectedSessi
           aria-current={session.id === selectedSessionId ? "true" : undefined}
           className={`block w-full cursor-pointer border-b border-border px-3 py-2 text-left hover:bg-bg-hover focus-visible:outline-2 focus-visible:outline-accent ${session.id === selectedSessionId ? "bg-bg-selected" : ""}`}
         >
-          <span className="block truncate text-xs font-medium text-text">{session.name || session.firstMessage}</span>
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="min-w-0 truncate text-xs font-medium text-text">{session.name || session.firstMessage}</span>
+            {archivedSessionIds?.has(session.id) && (
+              <span className="shrink-0 rounded-[4px] border border-border px-1 text-[10px] leading-[14px] text-text-dim">{t("sidebar.archived")}</span>
+            )}
+          </span>
           <span className="mt-1 flex min-w-0 gap-2 text-[10px] text-text-dim">
             <span className="min-w-0 flex-1 truncate" title={session.cwd}>{session.cwd}</span>
             <span className="shrink-0">{formatRelativeTime(session.modified, locale)}</span>

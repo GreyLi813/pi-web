@@ -1,7 +1,4 @@
-import { opendirSync } from "fs";
-import path from "path";
 import { getAdditionalAllowedRoots, normalizeSlashes } from "./allowed-roots";
-import { getRuntimeHomeDirectory } from "./runtime-paths";
 import { isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
 import { listAllSessions } from "./session-reader";
 export { allowFileRoot, normalizeSlashes } from "./allowed-roots";
@@ -29,28 +26,6 @@ export async function getAllowedFileRoots(): Promise<Set<string>> {
     // The project root (main repo shared by all worktrees) is browsable too —
     // the project dropdown lists it even when only worktrees have sessions.
     if (s.projectRoot) roots.add(normalizeSlashes(s.projectRoot));
-  }
-
-  // Also allow ~/pi-cwd-* directories created by the default-cwd endpoint.
-  // Use a directory handle instead of readdirSync: Next.js file tracing treats
-  // a statically resolvable readdir as a build input and otherwise copies the
-  // entire home directory into the production trace.
-  try {
-    const homeDirectory = getRuntimeHomeDirectory();
-    const directory = opendirSync(homeDirectory);
-    try {
-      let entry = directory.readSync();
-      while (entry) {
-        if (/^pi-cwd-\d{8}$/.test(entry.name)) {
-          roots.add(normalizeSlashes(path.join(homeDirectory, entry.name)));
-        }
-        entry = directory.readSync();
-      }
-    } finally {
-      directory.closeSync();
-    }
-  } catch {
-    // ignore if home is unreadable
   }
 
   for (const root of getAdditionalAllowedRoots()) roots.add(root);

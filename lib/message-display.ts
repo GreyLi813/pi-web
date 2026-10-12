@@ -8,9 +8,24 @@ export function getThinkingPreview(thinking: string): string {
   return thinking.trimStart().match(/^[^\r\n]{0,240}/u)?.[0].trimEnd() ?? "";
 }
 
-export function isMessageGroupAnchor(message: { role?: AgentMessage["role"]; customType?: string }): boolean {
+/**
+ * pi's TUI renders a custom message only when `display` is set; `display: false`
+ * is how an extension keeps a message for the model alone. The chat skips it too.
+ */
+export function isHiddenCustomMessage(message: { role?: AgentMessage["role"]; display?: boolean }): boolean {
+  return message.role === "custom" && !message.display;
+}
+
+export function isMessageGroupAnchor(message: { role?: AgentMessage["role"]; customType?: string; display?: boolean }): boolean {
+  // A background subagent completion starts a new displayed turn, same as a
+  // user message or compaction summary: pi-web's own, and @tintinweb/pi-subagents'
+  // (a follow-up that triggers a turn). Other custom messages stay inside the turn.
   return message.role === "user"
-    || (message.role === "custom" && message.customType === "compaction");
+    || (message.role === "custom" && !isHiddenCustomMessage(message) && (
+      message.customType === "compaction"
+      || message.customType === "pi-web:subagent-notification"
+      || message.customType === "subagent-notification"
+    ));
 }
 
 export function isEmptyThinkingBlock(block: AssistantContentBlock, options: DisplayOptions = {}): block is ThinkingContent {
@@ -44,6 +59,14 @@ export function isAssistantTruncated(
   return !options.isStreaming && message.stopReason === "length";
 }
 
+/** Text, an image, or a tool call is an answer. Thinking alone is not. */
+export function hasAssistantAnswer(message: AssistantMessage): boolean {
+  return (message.content ?? []).some((block) => {
+    if (block.type === "text") return block.text.trim().length > 0;
+    return block.type === "image" || block.type === "toolCall";
+  });
+}
+
 function isFinalAnswerBlock(block: AssistantContentBlock): boolean {
   return block.type === "text" || block.type === "image";
 }
@@ -65,4 +88,16 @@ export function splitFinalAssistantBlocks(
 
 export function countToolCallBlocks(blocks: AssistantContentBlock[]): number {
   return blocks.filter((block): block is ToolCallContent => block.type === "toolCall").length;
+}
+
+/**
+ * Process details start collapsed only above a real answer: text or an image in
+ * the answer the turn shows (null when it shows none). Under an error or
+ * truncation notice alone they stay open, since text the turn wrote before its
+ * last tool call sits in them and would be hidden (#906).
+ */
+export function collapsesProcessDetails(answer: AssistantMessage | null): boolean {
+  return (answer?.content ?? []).some((block) => (
+    block.type === "image" || (block.type === "text" && block.text.trim().length > 0)
+  ));
 }

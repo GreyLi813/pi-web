@@ -1,11 +1,22 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useI18n } from "@/hooks/useI18n";
+import { subscribeFontPreferences } from "@/hooks/useFontPreferences";
+import { readFontWeight } from "@/lib/font-preferences";
 import { createTerminalWriter, terminalRequest } from "@/lib/terminal-client";
+import {
+  applyTerminalModifiers,
+  NO_TERMINAL_MODIFIERS,
+  terminalExtraKeySequence,
+  type TerminalExtraKey,
+  type TerminalModifier,
+  type TerminalModifiers,
+} from "@/lib/terminal-extra-keys";
 import type { TerminalEvent } from "@/lib/terminal-manager";
+import { TerminalExtraKeys, useTerminalExtraKeysVisible } from "./TerminalExtraKeys";
 import type { TerminalTab } from "./terminal-tab-state";
 
 interface Props {
@@ -29,6 +40,29 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
   const [error, setError] = useState<string | null>(null);
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [reconnectKey, setReconnectKey] = useState(0);
+  const [modifiers, setModifiers] = useState<TerminalModifiers>(NO_TERMINAL_MODIFIERS);
+  const modifiersRef = useRef(modifiers);
+  const showExtraKeys = useTerminalExtraKeysVisible();
+
+  const consumeModifiers = useCallback(() => {
+    const current = modifiersRef.current;
+    if (current.ctrl || current.alt) {
+      modifiersRef.current = NO_TERMINAL_MODIFIERS;
+      setModifiers(NO_TERMINAL_MODIFIERS);
+    }
+    return current;
+  }, []);
+  const sendExtraKey = (key: TerminalExtraKey) => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    const sequence = terminalExtraKeySequence(key, consumeModifiers(), terminal.modes.applicationCursorKeysMode);
+    terminal.input(sequence, true);
+  };
+  const toggleModifier = (modifier: TerminalModifier) => {
+    const next = { ...modifiersRef.current, [modifier]: !modifiersRef.current[modifier] };
+    modifiersRef.current = next;
+    setModifiers(next);
+  };
 
   useEffect(() => {
     const container = containerRef.current;
@@ -43,9 +77,17 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
     setError(null);
     setExitCode(null);
 
+    const readTerminalFont = () => {
+      const style = getComputedStyle(container);
+      return {
+        fontFamily: style.getPropertyValue("--font-mono").trim() || "monospace",
+        // Base weights stop at 600, so xterm's default bold (700) stays heavier.
+        fontWeight: readFontWeight(style.getPropertyValue("--font-mono-weight")),
+      };
+    };
     const terminal = new Terminal({
       cursorBlink: true,
-      fontFamily: getComputedStyle(container).getPropertyValue("--font-mono").trim() || "monospace",
+      ...readTerminalFont(),
       fontSize: 13,
       lineHeight: 1.25,
       scrollback: 8000,
@@ -82,17 +124,26 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
     });
     writerRef.current = writer;
     const onData = terminal.onData((data) => {
-      if (connected && !exited && !inputFailed) writer.write(data);
+      if (connected && !exited && !inputFailed) writer.write(applyTerminalModifiers(data, consumeModifiers()));
     });
     const fitAndResize = () => {
       if (!container.offsetWidth || !container.offsetHeight) return;
       fit.fit();
     };
     const onResize = terminal.onResize(({ cols, rows }) => {
-      if (connected && !exited && !inputFailed) writer.resize(cols, rows);
+      if (!connected || exited || inputFailed) return;
+      writer.resize(Math.max(2, cols), Math.max(2, rows));
     });
     const resizeObserver = new ResizeObserver(fitAndResize);
     resizeObserver.observe(container);
+    const updateFont = () => {
+      if (disposed) return;
+      const font = readTerminalFont();
+      terminal.options.fontFamily = font.fontFamily;
+      terminal.options.fontWeight = font.fontWeight;
+      fitAndResize();
+    };
+    const unsubscribeFonts = subscribeFontPreferences(updateFont);
 
     const connect = () => {
       if (disposed || exited || !navigator.onLine) return;
@@ -120,7 +171,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
         terminal.options.disableStdin = false;
         setStatus("ready");
         fitAndResize();
-        writer.resize(terminal.cols, terminal.rows);
+        writer.resize(Math.max(2, terminal.cols), Math.max(2, terminal.rows));
         if (container.offsetWidth && container.offsetHeight) terminal.focus();
       };
       events.onerror = () => {
@@ -166,6 +217,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
       events?.close();
       void writer.stop();
       resizeObserver.disconnect();
+      unsubscribeFonts();
       onData.dispose();
       onResize.dispose();
       window.removeEventListener("pagehide", pageHide);
@@ -175,7 +227,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
       terminal.dispose();
       terminalRef.current = null;
     };
-  }, [id, cwd, restored, reconnectKey]);
+  }, [id, cwd, restored, reconnectKey, consumeModifiers]);
 
   useEffect(() => {
     if (active) terminalRef.current?.focus();
@@ -224,6 +276,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
         {status === "exited" && <div className="terminal-panel-exit" role="status">{exitCode === null ? t("terminal.exited") : t("terminal.exitCode", { code: exitCode })}</div>}
       </div>
       <div className="terminal-xterm"><div ref={containerRef} className="terminal-xterm-host" /></div>
+      {showExtraKeys && <TerminalExtraKeys modifiers={modifiers} onKey={sendExtraKey} onToggleModifier={toggleModifier} />}
     </section>
   );
 }

@@ -9,8 +9,10 @@ const jiti = createJiti(import.meta.url, {
 const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
 const {
+  CompactionSummaryDetails,
   MessageView,
   ThinkingBlock,
+  formatToolDuration,
   getModelDisplayName,
   getTokenEstimateText,
   getToolCallInputText,
@@ -18,6 +20,7 @@ const {
 } = await jiti.import("./MessageView.tsx");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const { splitFinalAssistantBlocks } = await jiti.import("@/lib/message-display");
+const { clearExpandedToolCalls, setToolCallExpanded } = await jiti.import("@/lib/tool-call-expansion");
 
 function renderMessage(message, props = {}) {
   return renderToStaticMarkup(
@@ -128,7 +131,51 @@ test("keeps streamed tool input out of collapsed markup while counting it", () =
   assert.equal(getTokenEstimateText(block), block.rawInput);
 });
 
-test("renders subagents as standard tool calls with only an extra session button", () => {
+test("renders write tool content as readable file text", () => {
+  const block = {
+    type: "toolCall",
+    toolCallId: "call-write-file",
+    toolName: "write",
+    input: { path: "src/example.ts", content: "first line\nsecond line\n" },
+  };
+  clearExpandedToolCalls();
+  setToolCallExpanded(block.toolCallId, true);
+  try {
+    const html = renderMessage({
+      role: "assistant",
+      provider: "anthropic",
+      model: "claude-test",
+      content: [block],
+    });
+
+    assert.ok(html.includes("src/example.ts"));
+    assert.match(html, /first line\nsecond line\n/);
+    assert.doesNotMatch(html, /"content":/);
+  } finally {
+    clearExpandedToolCalls();
+  }
+});
+
+test("keeps the input JSON for a write with another argument, an empty file or streamed input", () => {
+  const cases = [
+    { id: "call-write-mode", input: { path: "notes.md", content: "text", mode: "append" } },
+    { id: "call-write-empty", input: { path: "empty.txt", content: "" } },
+    { id: "call-write-streaming", input: {}, rawInput: "{\"path\":\"a.ts\",\"content\":\"one\\ntwo" },
+  ];
+  for (const { id, input, rawInput } of cases) {
+    const block = { type: "toolCall", toolCallId: id, toolName: "write", input, ...(rawInput === undefined ? {} : { rawInput }) };
+    clearExpandedToolCalls();
+    setToolCallExpanded(id, true);
+    try {
+      const html = renderMessage({ role: "assistant", provider: "anthropic", model: "claude-test", content: [block] });
+      assert.equal(textOf(html).includes(getToolCallInputText(block)), true, id);
+    } finally {
+      clearExpandedToolCalls();
+    }
+  }
+});
+
+test("renders subagents as standard tool calls with only an extra side-panel button", () => {
   const block = {
     type: "toolCall",
     toolCallId: "call-agent-1",
@@ -160,13 +207,13 @@ test("renders subagents as standard tool calls with only an extra session button
     content: [block],
   }, {
     toolResults: new Map([[block.toolCallId, result]]),
-    onOpenSession() {},
+    onOpenSubagent() {},
   });
 
   assert.match(html, /border:1px solid rgba\(34,197,94,0\.25\)/);
   assert.match(html, />Agent</);
   assert.match(html, />Explore</);
-  assert.match(html, /aria-label="Open sub-agent session"/);
+  assert.match(html, /aria-label="View sub-agent work in side panel"/);
   assert.doesNotMatch(html, />completed</);
   assert.doesNotMatch(html, />Find parser</);
 
@@ -177,9 +224,26 @@ test("renders subagents as standard tool calls with only an extra session button
     content: [{ ...block, toolCallId: "call-extension-1", toolName: "extension_tool" }],
   }, {
     toolResults: new Map(),
-    onOpenSession() {},
+    onOpenSubagent() {},
   });
-  assert.doesNotMatch(ordinaryHtml, /Open sub-agent session/);
+  assert.doesNotMatch(ordinaryHtml, /View sub-agent work in side panel/);
+});
+
+test("a tool card shows the run time pi recorded, else the timestamps' difference, never a tiny one", () => {
+  const block = { type: "toolCall", toolCallId: "call-duration-1", toolName: "bash", arguments: { command: "make" } };
+  const message = { role: "assistant", provider: "anthropic", model: "claude-test", content: [block], timestamp: 1_000_000, durationMs: 4_000 };
+  const header = (result) => renderMessage(message, { toolResults: new Map([[block.toolCallId, result]]) });
+  const result = { role: "toolResult", toolCallId: block.toolCallId, toolName: "bash", content: [], isError: false };
+  // pi 1.1 records the execution itself; the timestamps would count the model's 4 s of generation too.
+  assert.match(header({ ...result, timestamp: 1_006_400, durationMs: 2_400 }), />2\.4s</);
+  // A result saved before pi recorded durations falls back to the timestamps.
+  assert.match(header({ ...result, timestamp: 1_006_400 }), />6\.4s</);
+  assert.doesNotMatch(header({ ...result, timestamp: 1_006_400, durationMs: 40 }), />\d+\.\ds</);
+
+  assert.equal(formatToolDuration(400), "0.4s");
+  assert.equal(formatToolDuration(59_940), "59.9s");
+  assert.equal(formatToolDuration(185_000), "3m 5s");
+  assert.equal(formatToolDuration(3_725_000), "1h 2m 5s");
 });
 
 const COMPLETE_SKILL_EXPANSION = `<skill name="review" location="/skills/review/SKILL.md">
@@ -215,21 +279,40 @@ test("renders a truncation notice for stopReason length", () => {
   });
 
   assert.match(html, /role="alert"/);
-  assert.match(html, /output limit/i);
-  assert.match(html, /follow-up/i);
+  assert.match(html, /output limit was reached before an answer/i);
+  assert.doesNotMatch(html, /follow-up/i);
 });
 
-test("renders a truncation notice for thinking-only messages with stopReason length", () => {
+test("keeps the follow-up hint when a truncated response already has text", () => {
+  const html = renderMessage({
+    role: "assistant",
+    provider: "anthropic",
+    model: "claude-test",
+    content: [{ type: "text", text: "Partial answer" }],
+    stopReason: "length",
+  });
+
+  assert.match(html, /Partial answer/);
+  assert.match(html, /follow-up/i);
+  assert.doesNotMatch(html, /Compact context/);
+});
+
+test("offers compaction on an unanswered truncation and keeps its error with the reply", () => {
+  let compacted = 0;
   const html = renderMessage({
     role: "assistant",
     provider: "anthropic",
     model: "claude-test",
     content: [],
     stopReason: "length",
+  }, {
+    onCompact: () => { compacted += 1; },
+    compactError: "Summarization failed: generation hit the token cap",
   });
 
-  assert.match(html, /role="alert"/);
-  assert.match(html, /output limit/i);
+  assert.match(html, /Compact context/);
+  assert.match(html, /generation hit the token cap/);
+  assert.equal(compacted, 0);
 });
 
 test("renders partial assistant content before the provider error", () => {
@@ -278,6 +361,46 @@ test("does not collapse incomplete skill-looking user text", () => {
 
   assert.match(html, /ordinary user text/);
   assert.doesNotMatch(html, /aria-expanded/);
+});
+
+test("shows every line of pasted plain text in a user message (#680)", () => {
+  const lines = [
+    "第1题（看门狗）",
+    "嵌入式系统中，看门狗（WatchDog）的基本工作原理是（ ）",
+    "A. 监控系统温度，过热时自动降频",
+    "B. 计数器自动计数，程序定期将其重置；若程序跑飞计数器溢出，则系统复位重启",
+  ];
+  const expected = `<p>${lines.join("<br/>")}</p>`;
+
+  for (const lineEnding of ["\n", "\r\n", "\r"]) {
+    const html = renderMessage({ role: "user", content: lines.join(lineEnding) });
+    assert.ok(html.includes(expected), JSON.stringify(lineEnding));
+    assert.doesNotMatch(html, /\r/);
+  }
+
+  const listHtml = renderMessage({
+    role: "user",
+    content: [{ type: "text", text: "1. 看门狗的原理是（ ）\nA. 监控温度\nB. 计数器" }],
+  });
+  assert.match(listHtml, /<li>看门狗的原理是（ ）<br\/>A\. 监控温度<br\/>B\. 计数器<\/li>/);
+});
+
+test("keeps assistant soft line breaks as Markdown paragraphs", () => {
+  const html = renderMessage({ role: "assistant", content: [{ type: "text", text: "one\ntwo" }] });
+
+  assert.match(html, /<p>one\ntwo<\/p>/);
+  assert.doesNotMatch(html, /<br/);
+});
+
+test("renders lone carriage returns in compact command arguments as line breaks", () => {
+  const html = renderMessage({
+    role: "user",
+    content: COMPLETE_SKILL_EXPANSION.replace("src/main.ts", "src/main.ts\rsrc/app.ts"),
+  });
+
+  assert.match(html, /\/skill:review/);
+  assert.match(html, /src\/main\.ts\nsrc\/app\.ts/);
+  assert.doesNotMatch(html, /\r/);
 });
 
 test("keeps attached images when restoring a compact command for editing", () => {
@@ -339,6 +462,36 @@ test("marks apply_patch returned failures as errors even when isError is unset",
   assert.doesNotMatch(html, /border:1px solid rgba\(34,197,94,0\.25\)/);
 });
 
+test("collapses a displayed custom message from its header alone", () => {
+  const custom = (props) => renderMessage({
+    role: "custom",
+    customType: "extension",
+    display: true,
+    timestamp: Date.now(),
+    ...props,
+  });
+  // The header is the card's first button and the only one holding the title.
+  const header = (html) => html.slice(0, html.indexOf("</button>"));
+
+  // The header is the toggle, so a message with no `details` can collapse too.
+  const shown = custom({ content: [{ type: "text", text: "a message with no details" }] });
+  assert.match(header(shown), /aria-expanded="true"/);
+  assert.match(header(shown), />extension</);
+  // The footer is for details only; it is not a second way to collapse.
+  assert.doesNotMatch(shown, /Show details|Hide details/);
+
+  // It starts expanded, as pi's TUI draws a displayed custom message in full.
+  assert.match(shown, /a message with no details/);
+  // A message with no text (images only) can collapse too.
+  assert.match(header(custom({ content: [] })), /aria-expanded="true"/);
+
+  // A message that does carry details keeps that button, for its details.
+  assert.match(
+    custom({ content: [{ type: "text", text: "a message with details" }], details: { files: ["a.ts"] } }),
+    /Show details/,
+  );
+});
+
 test("renders custom-message images as buttons that open a larger preview", () => {
   const html = renderMessage({
     role: "custom",
@@ -377,4 +530,225 @@ test("shows tool-result images while the tool details stay collapsed", () => {
   assert.match(html, /<img[^>]+src="data:image\/png;base64,YWJj"/);
   assert.doesNotMatch(html, /captured-1280x720/);
   assert.doesNotMatch(html, /"tabId"/);
+});
+
+test("uses the unanswered truncation notice for an empty length reply", () => {
+  // A nearly full context can clamp the output so far that nothing, not even
+  // thinking, comes back; the notice must not blame thinking alone.
+  const html = renderMessage({
+    role: "assistant",
+    provider: "anthropic",
+    model: "claude-test",
+    content: [],
+    stopReason: "length",
+  });
+
+  assert.match(html, /output limit was reached before an answer/i);
+  assert.match(html, /nearly full context/i);
+  assert.doesNotMatch(html, /follow-up/i);
+});
+
+function textOf(html) {
+  return html.replace(/<[^>]+>/g, "").replace(/&quot;/g, "\"").replace(/&amp;/g, "&").replace(/&#x27;/g, "'");
+}
+
+function codemodeCall(toolCallId, code) {
+  return { type: "toolCall", toolCallId, toolName: "codemode", input: { code } };
+}
+
+function renderCodemode(block, result) {
+  return renderMessage({
+    role: "assistant",
+    provider: "anthropic",
+    model: "claude-test",
+    content: [block],
+  }, { toolResults: new Map(result ? [[block.toolCallId, result]] : []) });
+}
+
+const CODEMODE_SCRIPT = "// @options: {\"timeoutMs\": 5000}\nconst files = await tools.ls({ path: \".\" });\nreturn files.length;";
+
+test("collapses a codemode call to its first script line and call count", (t) => {
+  const block = codemodeCall("call-codemode-collapsed", CODEMODE_SCRIPT);
+  t.after(() => setToolCallExpanded(block.toolCallId, false));
+  const html = renderCodemode(block, {
+    role: "toolResult",
+    toolCallId: block.toolCallId,
+    content: [{ type: "text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" }, { type: "text", text: "3" }],
+    details: {
+      calls: [
+        { id: "call-codemode-collapsed/1", name: "ls", args: "{\"path\":\".\"}", status: "ok", durationMs: 4 },
+        { id: "call-codemode-collapsed/2", name: "read", args: "{\"path\":\"a\"}", status: "ok", durationMs: 2 },
+      ],
+    },
+  });
+  const text = textOf(html);
+  assert.match(text, /codemode/);
+  assert.match(text, /const files = await tools\.ls\(\{ path: "\." \}\);/);
+  assert.match(text, /2 calls/);
+  assert.doesNotMatch(text, /@options/);
+  assert.doesNotMatch(text, /"code"/);
+  assert.doesNotMatch(text, /Tool calls/);
+});
+
+test("expands a codemode call into its script, its calls, and the output without the header", (t) => {
+  const block = codemodeCall("call-codemode-expanded", CODEMODE_SCRIPT);
+  setToolCallExpanded(block.toolCallId, true);
+  t.after(() => setToolCallExpanded(block.toolCallId, false));
+  const calls = Array.from({ length: 23 }, (_, index) => ({
+    id: `call-codemode-expanded/${index + 1}`,
+    name: index === 22 ? "bash" : "read",
+    args: `{"path":"file-${index + 1}"}`,
+    status: index === 22 ? "error" : "ok",
+    durationMs: 1500,
+    ...(index === 22 ? { error: "exit code 2" } : {}),
+  }));
+  calls.push(
+    { id: "call-codemode-expanded/24", name: "models.classify", args: "", status: "ok", cost: 0.004 },
+    { id: "call-codemode-expanded/25", name: "models.classify", args: "", status: "ok", cost: 0.006 },
+  );
+  const html = renderCodemode(block, {
+    role: "toolResult",
+    toolCallId: block.toolCallId,
+    isError: true,
+    content: [
+      { type: "text", text: "Script failed\nWall time 4.2 seconds\nOutput:\n" },
+      { type: "text", text: "Script error:\nError: exit code 2" },
+    ],
+    details: { calls },
+  });
+  const text = textOf(html);
+
+  // The script sits in the plain box any tool's input uses, not a highlighted code block.
+  assert.doesNotMatch(html, /markdown-code-block/);
+  assert.equal(textOf(html.match(/<pre[^>]*>([\s\S]*?)<\/pre>/)[1]), CODEMODE_SCRIPT);
+  assert.match(text, /Tool calls/);
+  assert.match(text, /Show 5 earlier calls/);
+  // The newest 20 of 25 calls are listed; the 5 oldest are folded.
+  assert.doesNotMatch(text, /"file-5"/);
+  assert.match(text, /"file-6"/);
+  assert.match(text, /bash\{"path":"file-23"\}1\.5s/);
+  assert.match(text, /exit code 2/);
+  assert.match(html, /aria-label="Failed"/);
+  assert.match(text, /Model calls: \$0\.01/);
+  assert.match(text, /Script error:\nError: exit code 2/);
+  assert.doesNotMatch(text, /Wall time/);
+  assert.doesNotMatch(text, /"code":/);
+});
+
+test("shows a running script's calls without an empty output", (t) => {
+  const block = codemodeCall("call-codemode-running", "await tools.read({ path: \"a\" })");
+  setToolCallExpanded(block.toolCallId, true);
+  t.after(() => setToolCallExpanded(block.toolCallId, false));
+  const html = renderCodemode(block, {
+    role: "toolResult",
+    toolCallId: block.toolCallId,
+    content: [],
+    details: {
+      calls: [{ id: "call-codemode-running/201", name: "read", args: "{\"path\":\"a\"}", status: "running" }],
+      omittedCalls: 200,
+    },
+  });
+  const text = textOf(html);
+  assert.match(text, /201 calls/);
+  assert.match(text, /200 earlier calls not shown/);
+  assert.match(html, /aria-label="Running"/);
+  assert.doesNotMatch(text, /No output/i);
+});
+
+test("keeps the generic view for a codemode call whose input is still streaming or has no script", (t) => {
+  const streaming = { ...codemodeCall("call-codemode-streaming", ""), input: {}, rawInput: "{\"code\":\"const secret" };
+  setToolCallExpanded(streaming.toolCallId, true);
+  t.after(() => setToolCallExpanded(streaming.toolCallId, false));
+  const streamingText = textOf(renderCodemode(streaming));
+  assert.match(streamingText, /Generating parameters/);
+  assert.match(streamingText, /\{"code":"const secret/);
+  assert.doesNotMatch(streamingText, /Tool calls/);
+
+  const other = { type: "toolCall", toolCallId: "call-codemode-other", toolName: "codemode", input: { script: "x" } };
+  setToolCallExpanded(other.toolCallId, true);
+  t.after(() => setToolCallExpanded(other.toolCallId, false));
+  assert.match(textOf(renderCodemode(other)), /"script": "x"/);
+});
+
+test("labels an MCP call server/tool and indents a JSON result", (t) => {
+  const block = {
+    type: "toolCall",
+    toolCallId: "call-mcp-1",
+    toolName: "mcp__docs_v2__search",
+    input: { query: "codemode" },
+  };
+  setToolCallExpanded(block.toolCallId, true);
+  t.after(() => setToolCallExpanded(block.toolCallId, false));
+  const html = renderMessage({
+    role: "assistant",
+    provider: "anthropic",
+    model: "claude-test",
+    content: [block],
+  }, {
+    toolResults: new Map([[block.toolCallId, {
+      role: "toolResult",
+      toolCallId: block.toolCallId,
+      content: [{ type: "text", text: "{\"hits\":[{\"title\":\"Code mode\"}]}" }],
+      details: { server: "docs.v2", tool: "search" },
+    }]]),
+  });
+  const text = textOf(html);
+  assert.match(text, /docs\.v2\/search/);
+  assert.match(html, /title="mcp__docs_v2__search"/);
+  assert.match(text, /\{\n {2}"hits": \[\n {4}\{\n {6}"title": "Code mode"/);
+});
+
+test("keeps the registered name where no result names the server and tool", (t) => {
+  // Sanitizing maps docs.v2/search.pages and docs_v2/search_pages to one name, so it is not split.
+  const block = { type: "toolCall", toolCallId: "call-mcp-running", toolName: "mcp__docs_v2__search_pages", input: {} };
+  const running = textOf(renderMessage({
+    role: "assistant",
+    provider: "anthropic",
+    model: "claude-test",
+    content: [block],
+  }, { toolResults: new Map() }));
+  assert.match(running, /mcp__docs_v2__search_pages/);
+  assert.doesNotMatch(running, /docs_v2\//);
+
+  // A codemode script's calls carry only that name, which is also what the script calls.
+  const script = codemodeCall("call-codemode-mcp", "await tools.mcp__docs_v2__search_pages({})");
+  setToolCallExpanded(script.toolCallId, true);
+  t.after(() => setToolCallExpanded(script.toolCallId, false));
+  const html = renderCodemode(script, {
+    role: "toolResult",
+    toolCallId: script.toolCallId,
+    content: [{ type: "text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" }],
+    details: { calls: [{ id: "call-codemode-mcp/1", name: "mcp__docs_v2__search_pages", args: "{}", status: "ok" }] },
+  });
+  assert.match(textOf(html), /mcp__docs_v2__search_pages\{\}/);
+});
+
+test("collapses the compaction summary to its title and token count, as pi's TUI does (#1026)", () => {
+  const summary = "## Goal\n\nShip the parser fix.\n\n<read-files>\nlib/read.ts\n</read-files>\n\n<modified-files>\nlib/changed.ts\n</modified-files>";
+  const message = {
+    role: "custom",
+    customType: "compaction",
+    content: summary,
+    display: true,
+    details: { tokensBefore: 123456, firstKeptEntryId: "kept0001" },
+  };
+  const html = renderMessage(message);
+
+  assert.match(html, /<button type="button" aria-expanded="false" title="Expand"/);
+  assert.match(html, /Conversation compacted/);
+  assert.ok(html.includes(`Compacted from ${(123456).toLocaleString()} tokens`));
+  assert.doesNotMatch(html, /Ship the parser fix|following summary|File context|lib\/read\.ts|lib\/changed\.ts/);
+  assert.doesNotMatch(renderMessage({ ...message, details: undefined }), /Compacted from/);
+
+  // What the toggle reveals.
+  const details = renderToStaticMarkup(React.createElement(
+    I18nProvider,
+    null,
+    React.createElement(CompactionSummaryDetails, { summary }),
+  ));
+  assert.match(details, /following summary/);
+  assert.match(details, /Ship the parser fix/);
+  assert.match(details, /File context: 1 read, 1 modified/);
+  assert.match(details, /lib\/read\.ts/);
+  assert.match(details, /lib\/changed\.ts/);
 });

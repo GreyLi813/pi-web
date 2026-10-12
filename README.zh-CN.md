@@ -4,6 +4,8 @@
 
 [pi 编程智能体](https://github.com/earendil-works/pi)的本地浏览器界面。Pi Web 与 pi 共用本机配置和会话文件，可在浏览器中查找和继续对话、运行智能体、配置模型与资源，并查看项目文件。
 
+**[在线体验演示 →](https://agegr.github.io/pi-web/)**：真实的 Pi Web 界面直接在浏览器里运行，带有示例会话、文件和模型。无需安装；回复都是预设内容，不会调用任何模型。
+
 中文微信群：请查看 [GitHub Discussions 帖子](https://github.com/agegr/pi-web/discussions/271)。
 
 ![Pi Web 展示包含结构化 Markdown、工具调用和项目导航的 pi 会话](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
@@ -37,7 +39,17 @@ npm install -g @agegr/pi-web@latest
 pi-web
 ```
 
-更新前先用 `Ctrl+C` 停止正在运行的进程，再次执行同一条安装命令。卸载时运行 `npm uninstall -g @agegr/pi-web`。
+命令：
+
+```bash
+pi-web version          # 打印已安装的版本
+pi-web status           # 列出正在运行的服务
+pi-web stop [--port N]  # 停止正在运行的服务
+pi-web open [--port N]  # 在浏览器中打开正在运行的服务
+pi-web update [--check] # 更新全局 npm 安装
+```
+
+更新时先运行 `pi-web stop`，再运行 `pi-web update`（也可以再次执行同一条安装命令）。卸载时运行 `npm uninstall -g @agegr/pi-web`。
 
 ## 配置
 
@@ -49,8 +61,11 @@ pi-web
 | `--port <端口>`、`-p <端口>` 或 `PORT` | 服务端口 | `30141` |
 | `--hostname <主机>`、`-H <主机>` 或 `PI_WEB_HOSTNAME` | 监听主机名 | `127.0.0.1` |
 | `--no-open` 或 `PI_WEB_NO_OPEN=1` | 不自动打开浏览器 | 自动打开 |
+| `PI_WEB_APP_NAME` | PWA manifest 的 `name` 和 `short_name`；去除首尾空白，空值使用默认值 | `Pi Web` |
 | `PI_WEB_ALLOWED_HOSTS` | 额外允许的代理或自定义主机名，多个值用逗号分隔，必须精确匹配 | 未设置 |
 | `PI_WEB_PASSWORD` | 启用浏览器密码登录；API 客户端可使用用户名为 `pi` 的 Basic Auth | 不启用认证 |
+
+在启动服务前设置 `PI_WEB_APP_NAME`，例如 `PI_WEB_APP_NAME='工作 Pi' pi-web`。修改后重启服务即可提供新的 manifest，无需重新构建。已安装 PWA 的名称更新由浏览器管理，不保证立即生效；此设置不改变页面标题或图标。
 
 例如：
 
@@ -131,6 +146,7 @@ lib/             会话、智能体、调度、编排、模型、文件、Git �
 public/          静态资源和 PWA 文件
 bin/             npm CLI 入口及启动参数解析
 docs/            面向用户和贡献者的专题文档
+demo/            发布到 GitHub Pages 的静态演示站（见 demo/README.md）
 ```
 
 架构说明和详细文件地图见 [AGENTS.md](./AGENTS.md)。

@@ -4,6 +4,8 @@
 
 [pi コーディングエージェント](https://github.com/earendil-works/pi) のローカルブラウザー UI です。Pi Web は pi と同じローカル設定とセッションファイルを使用し、ブラウザーから会話の検索と再開、エージェントの実行、モデルやリソースの設定、プロジェクトファイルの確認を行えます。
 
+**[インタラクティブデモを試す →](https://agegr.github.io/pi-web/)**：実際の Pi Web UI がブラウザー内だけで動作し、サンプルのセッション、ファイル、モデルを確認できます。インストールは不要です。返信はあらかじめ用意された内容で、モデルは呼び出しません。
+
 ![構造化された Markdown、ツール呼び出し、プロジェクトナビゲーションとともに pi セッションを表示する Pi Web](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
 
 ## 機能
@@ -34,7 +36,17 @@ npm install -g @agegr/pi-web@latest
 pi-web
 ```
 
-更新時は、実行中のプロセスを `Ctrl+C` で停止してから同じインストールコマンドを再実行します。アンインストールするには `npm uninstall -g @agegr/pi-web` を実行します。
+コマンド：
+
+```bash
+pi-web version          # インストール済みのバージョンを表示
+pi-web status           # 実行中のサーバーを一覧表示
+pi-web stop [--port N]  # 実行中のサーバーを停止
+pi-web open [--port N]  # 実行中のサーバーをブラウザーで開く
+pi-web update [--check] # グローバル npm インストールを更新
+```
+
+更新時は `pi-web stop` を実行してから `pi-web update` を実行します（同じインストールコマンドの再実行でも構いません）。アンインストールするには `npm uninstall -g @agegr/pi-web` を実行します。
 
 ## 設定
 
@@ -125,6 +137,7 @@ lib/             セッション、エージェント、モデル、ファイル
 public/          静的アセットと PWA ファイル
 bin/             npm CLI エントリポイントと起動オプションの解析
 docs/            ユーザーおよびコントリビューター向けの個別ガイド
+demo/            GitHub Pages で公開する静的デモ（demo/README.md を参照）
 ```
 
 アーキテクチャの説明と詳細なファイルマップについては [AGENTS.md](./AGENTS.md) を参照してください。
