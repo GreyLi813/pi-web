@@ -1203,12 +1203,25 @@ export class AgentSessionWrapper {
           let preflightAccepted = false;
           let preflightSettled = false;
           let promptSettled = false;
+          let preflightDisposition: "started" | "queued" | "handled" | null = null;
           let acceptPreflight!: () => void;
+          let releasePreflight!: () => void;
           let rejectPreflight!: (error: unknown) => void;
           const preflight = new Promise<void>((resolvePreflight, reject) => {
+            // A started run always ends with agent_settled, so the wrapper may expect one.
             acceptPreflight = () => {
               preflightAccepted = true;
               this.agentRunNeedsCompletion = true;
+              if (preflightSettled) return;
+              preflightSettled = true;
+              resolvePreflight();
+            };
+            // "queued" and "handled" inputs start no run, so no agent_settled can follow.
+            // Release the RPC caller without arming completion; otherwise the session
+            // stays "running" forever waiting for a settle that never arrives.
+            // @author GPT-5.6 Sol
+            // @version 1.0.0
+            releasePreflight = () => {
               if (preflightSettled) return;
               preflightSettled = true;
               resolvePreflight();
@@ -1234,11 +1247,17 @@ export class AgentSessionWrapper {
               ...(promptImages?.length ? { images: promptImages } : {}),
               ...(streamingBehavior ? { streamingBehavior } : {}),
               source: "rpc",
-              preflightResult: (success) => {
-                if (success) {
-                  this.applyExactSystemPrompt();
+              preflightResult: (disposition) => {
+                preflightDisposition = disposition;
+                // The transcript's system prompt must be exact for every later request,
+                // including the one that eventually drains a queued steer, so always reapply it.
+                this.applyExactSystemPrompt();
+                // Only "started" begins a run that ends with agent_settled.
+                if (disposition === "started") {
                   acceptPreflight();
+                  return;
                 }
+                releasePreflight();
               },
             });
           } catch (error) {
@@ -1251,7 +1270,13 @@ export class AgentSessionWrapper {
           }
 
           void prompt.then(() => {
-            acceptPreflight();
+            // Keep the fallback arm only for prompts that really start a run. A queued or
+            // extension-handled input resolves here too, but must not arm completion.
+            if (preflightDisposition === "queued" || preflightDisposition === "handled") {
+              releasePreflight();
+            } else {
+              acceptPreflight();
+            }
             if (startsPrimaryRun) this.promptRunning = false;
             finishPrompt();
             if (!streamingBehavior) {

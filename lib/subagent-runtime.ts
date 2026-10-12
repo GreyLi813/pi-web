@@ -341,8 +341,10 @@ export function createSubagentController(
             source: "rpc",
             ...(chatOnly
               ? {
-                  preflightResult: (success: boolean) => {
-                    if (success && inner.agent.state) {
+                  preflightResult: (disposition) => {
+                    // Only a started run replays the profile prompt into the transcript.
+                    // A queued or handled input starts no run, so its transcript must stay untouched.
+                    if (disposition === "started" && inner.agent.state) {
                       inner.agent.state.messages = withTranscriptSystemPrompt(inner.agent.state.messages, profile.systemPrompt);
                     }
                   },

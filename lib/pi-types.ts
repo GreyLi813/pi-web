@@ -166,7 +166,11 @@ export interface AgentSessionLike {
     images?: Array<{ type: "image"; data: string; mimeType: string }>;
     streamingBehavior?: "steer" | "followUp";
     source?: "interactive" | "rpc";
-    preflightResult?: (success: boolean) => void;
+    /** How an accepted prompt was dispatched. Only "started" begins a new run;
+     * "queued" (steer/follow-up during streaming) and "handled" (extension or input
+     * handler consumed it) never do. Mirrors Pi's `PromptDisposition`.
+     */
+    preflightResult?: (disposition: "started" | "queued" | "handled") => void;
   }): Promise<void>;
   sendCustomMessage<T = unknown>(message: {
     customType: string;
@@ -193,8 +197,12 @@ export interface AgentSessionLike {
   getLastAssistantText(): string | undefined;
   setAutoCompactionEnabled(enabled: boolean): void;
   setAutoRetryEnabled(enabled: boolean): void;
-  steer(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<void>;
-  followUp(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<void>;
+  /** Returns how the input was dispatched: "handled" by a handler that produced its own
+   * response, or "queued" for delivery to the running agent loop. Mirrors Pi's
+   * `QueuedInputDisposition`; Pi 0.87.1+ reports it instead of resolving to void.
+   */
+  steer(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, options?: { source?: "interactive" | "rpc" }): Promise<"handled" | "queued">;
+  followUp(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, options?: { source?: "interactive" | "rpc" }): Promise<"handled" | "queued">;
   readonly pendingMessageCount: number;
   getSteeringMessages(): readonly string[];
   getFollowUpMessages(): readonly string[];

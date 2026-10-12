@@ -35,6 +35,20 @@ const nextConfig: NextConfig = {
     "@earendil-works/pi-ai",
     "@earendil-works/pi-tui",
   ],
+  // Pi reads a few support files through paths it assembles at runtime
+  // (getPackageDir() + "dist/modes/interactive/theme/..." etc.), which the
+  // standalone tracer cannot see. Without this the offline bundle ships
+  // without them: the built-in theme JSONs are loaded on the first session
+  // creation, so every /api/agent/* call fails with ENOENT and the web UI
+  // reports HTTP 500. The HTML export templates are missing the same way.
+  outputFileTracingIncludes: {
+    "/*": [
+      "./node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/**",
+      "./node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/assets/**",
+      "./node_modules/@earendil-works/pi-coding-agent/dist/core/export-html/**",
+      "./node_modules/@earendil-works/pi-tui/native/**",
+    ],
+  },
   // Next 16 blocks cross-origin access to dev resources by default. Allow the
   // loopback and the RFC1918 LAN ranges so the dev server stays reachable
   // from other machines on the same LAN.
