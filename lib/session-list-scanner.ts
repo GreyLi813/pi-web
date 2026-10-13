@@ -9,7 +9,7 @@ import { readdir, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
-import { getAgentDir, isPeerSessionMetadata, isSessionOrchestrationMetadata, type PeerSessionMetadata, type SessionOrchestrationMetadata } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 
 export interface ScannedSessionInfo {
@@ -24,8 +24,6 @@ export interface ScannedSessionInfo {
 	parentSessionPath?: string;
 	/** True when only header/stat metadata was available for this listing. */
 	detailsPending?: boolean;
-	orchestration?: SessionOrchestrationMetadata;
-	peer?: PeerSessionMetadata;
 }
 
 interface Fingerprint {
@@ -46,7 +44,7 @@ function isRecord(value: unknown): value is RawEntry {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-const INDEX_FORMAT_VERSION = 2;
+const INDEX_FORMAT_VERSION = 1;
 
 declare global {
 	var __piWebScanIndex: Map<string, IndexEntry> | undefined;
@@ -218,10 +216,6 @@ export async function scanSessionFileInfo(
 			typeof header.parentSession === "string"
 				? header.parentSession
 				: undefined;
-		const orchestration = isSessionOrchestrationMetadata(header.orchestration)
-			? header.orchestration
-			: undefined;
-		const peer = isPeerSessionMetadata(header.peer) ? header.peer : undefined;
 		const headerTime =
 			typeof header.timestamp === "string"
 				? new Date(header.timestamp).getTime()
@@ -239,8 +233,6 @@ export async function scanSessionFileInfo(
 			cwd,
 			name,
 			parentSessionPath,
-			orchestration,
-			peer,
 			created: new Date(header.timestamp as string),
 			modified,
 			messageCount,
@@ -335,10 +327,6 @@ function loadPersistedIndex(): void {
 					cwd: info.cwd,
 					name: info.name,
 					parentSessionPath: info.parentSessionPath,
-					orchestration: isSessionOrchestrationMetadata(info.orchestration)
-						? info.orchestration
-						: undefined,
-					peer: isPeerSessionMetadata(info.peer) ? info.peer : undefined,
 					firstMessage: info.firstMessage,
 					messageCount: info.messageCount,
 					created,

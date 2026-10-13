@@ -42,14 +42,6 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function runIdentityFields(event: AgentEventLike): Record<string, unknown> {
-  return {
-    ...(typeof event.runtimeInstanceId === "string" ? { runtimeInstanceId: event.runtimeInstanceId } : {}),
-    ...(typeof event.runId === "string" ? { runId: event.runId } : {}),
-    ...(typeof event.runEpoch === "number" ? { runEpoch: event.runEpoch } : {}),
-  };
-}
-
 /**
  * A `tool_execution_*` event for a call that another tool made while it ran
  * (`ctx.executeTool()`, which codemode scripts use). The SDK gives those
@@ -87,14 +79,10 @@ function truncateCodemodeSnapshot(partialResult: unknown): unknown {
  */
 function toClientToolExecutionEvent(event: AgentEventLike): AgentEventLike | null {
   const nested = isNestedToolExecutionEvent(event);
-  // Local run identity (runtimeInstanceId / runId / runEpoch) must survive every
-  // projection: the client drops the events of a superseded run epoch.
-  const identity = runIdentityFields(event);
   if (event.type === "tool_execution_start") {
     if (!nested) return event;
     return {
       type: "tool_execution_start",
-      ...identity,
       toolCallId: event.toolCallId,
       toolName: event.toolName,
       parentToolCallId: event.parentToolCallId,
@@ -104,7 +92,6 @@ function toClientToolExecutionEvent(event: AgentEventLike): AgentEventLike | nul
     if (nested) return null;
     return {
       type: "tool_execution_update",
-      ...identity,
       toolCallId: event.toolCallId,
       toolName: event.toolName,
       partialResult: event.toolName === "codemode"
@@ -114,7 +101,6 @@ function toClientToolExecutionEvent(event: AgentEventLike): AgentEventLike | nul
   }
   return {
     type: "tool_execution_end",
-    ...identity,
     toolCallId: event.toolCallId,
     toolName: event.toolName,
     isError: event.isError,
@@ -178,11 +164,9 @@ export function toClientAgentEvent(
       || Array.isArray(assistantMessageEvent)
     ) return null;
 
-    const identity = runIdentityFields(event);
     if (!("partial" in assistantMessageEvent)) {
       return {
         type: "message_update",
-        ...identity,
         assistantMessageEvent,
       } as ClientMessageUpdateEvent;
     }
@@ -192,7 +176,6 @@ export function toClientAgentEvent(
     void _partial;
     return {
       type: "message_update",
-      ...identity,
       assistantMessageEvent: metadata ? { ...deltaEvent, ...metadata } : deltaEvent,
     } as ClientMessageUpdateEvent;
   }
@@ -203,9 +186,7 @@ export function toClientAgentEvent(
     || event.type === "tool_execution_end"
   ) return toClientToolExecutionEvent(event);
 
-  if (event.type === "agent_end") {
-    return { type: "agent_end", ...runIdentityFields(event) };
-  }
+  if (event.type === "agent_end") return { type: "agent_end" };
   return event;
 }
 

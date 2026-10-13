@@ -1,5 +1,3 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Api, Model } from "@earendil-works/pi-ai";
 import type {
   AgentSessionEvent,
   BashOperations,
@@ -17,7 +15,10 @@ export interface ContextUsage {
   tokens: number | null;
 }
 
-export type ModelLike = Model<Api>;
+export interface ModelLike {
+  id: string;
+  provider: string;
+}
 
 export interface ToolInfo {
   name: string;
@@ -132,7 +133,6 @@ export interface AgentSessionLike {
   readonly autoCompactionEnabled: boolean;
   readonly autoRetryEnabled: boolean;
   readonly model: ModelLike | undefined;
-  readonly messages: AgentMessage[];
   readonly modelRuntime: {
     getModel: (provider: string, modelId: string) => ModelLike | undefined;
     refresh: (options?: { allowNetwork?: boolean }) => Promise<unknown>;
@@ -151,7 +151,6 @@ export interface AgentSessionLike {
     state?: {
       /** Replayed from the transcript's system messages since Pi 0.86; never assign it. */
       readonly systemPrompt?: string;
-      messages: AgentMessage[];
       thinkingLevel?: string;
       streamingMessage?: PiAgentMessage;
       /** The declared tools, with the descriptions `prepareLoadout` hooks set for the model. */
@@ -164,7 +163,6 @@ export interface AgentSessionLike {
 
   readonly bindExtensions?: unknown;
   dispose(): void;
-  waitForRuntimeCleanup?(): Promise<void>;
   reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void>;
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
   prompt(text: string, options?: {

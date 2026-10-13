@@ -39,22 +39,15 @@
     "dev": "node scripts/dev-test.mjs",
     "dev:test": "node scripts/dev-test.mjs",
     "dev:lan": "node scripts/dev-test.mjs",
-    "prebuild": "npm run verify:agent-protocol",
     "build": "next build --webpack",
-    "prestart": "npm run verify:agent-protocol",
     "start": "next start -H 127.0.0.1 -p 30141",
-    "prestart:lan": "npm run verify:agent-protocol",
     "start:lan": "next start -H 0.0.0.0 -p 30141",
     "lint": "eslint .",
     "test:terminal": "node e2e/terminal.mjs",
     "test:e2e": "node e2e/run.mjs",
     "test": "node --experimental-strip-types --test \"app/**/*.test.mjs\" \"components/**/*.test.mjs\" \"hooks/**/*.test.mjs\" \"lib/**/*.test.mjs\" \"public/**/*.test.mjs\"",
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public",
-    "test:runtime": "node --test scripts/test-runtime.test.mjs",
-    "test:orchestration": "node scripts/session-orchestration-e2e.mjs",
-    "test:peer-session": "node scripts/peer-session-e2e.mjs",
-    "verify:agent-protocol": "node scripts/verify-agent-protocol.mjs",
-    "smoke:agent-protocol": "node scripts/pack-pi-agent-protocol.mjs --smoke"
+    "test:runtime": "node --test scripts/test-runtime.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "1.1.0",

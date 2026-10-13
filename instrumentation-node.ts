@@ -1,11 +1,7 @@
-import * as PiAgent from "@earendil-works/pi-coding-agent";
-import { assertPiAgentProtocol } from "@/lib/agent-protocol";
 import { configureHttpDispatcher, readHttpIdleTimeoutMs } from "@/lib/http-dispatcher";
 import { closeAllAgentEventStreams } from "@/lib/agent-event-stream";
-import { startPersistentSessionScheduler } from "@/lib/session-scheduler";
 
-export async function registerNodeInstrumentation(): Promise<void> {
-  assertPiAgentProtocol(PiAgent);
+export function registerNodeInstrumentation(): void {
   // The pi CLI applies settings' `httpIdleTimeoutMs` to the same undici
   // body/header timeouts, so a Web UI session gets the timeout the user
   // configured. Without it the built-in five minutes aborts a provider stream
@@ -19,7 +15,10 @@ export async function registerNodeInstrumentation(): Promise<void> {
   process.on("SIGINT", shutdownStreams);
   process.on("SIGTERM", shutdownStreams);
 
-  // The static `PiAgent` import above loads the SDK at module load, so
-  // upstream's unawaited dynamic preload (#964) is redundant here.
-  await startPersistentSessionScheduler();
+  // Next evaluates a route's code on its first request, so the first
+  // /api/sessions used to pay for importing the whole pi SDK, seconds on
+  // Windows (#964). Start that import now, unawaited so register() stays fast:
+  // it overlaps the browser opening, and the routes reuse Node's cached module.
+  // A failure is left for the routes' own import to report.
+  import("@earendil-works/pi-coding-agent").catch(() => {});
 }

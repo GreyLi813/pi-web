@@ -2,7 +2,7 @@ import {
   SessionManager,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { closeSync, type Dirent, existsSync, fstatSync, openSync, readSync, statSync } from "fs";
+import { closeSync, type Dirent, fstatSync, openSync, readSync, statSync } from "fs";
 import { readdir } from "fs/promises";
 import { isAbsolute, join, normalize as normalizePath, relative, resolve as resolvePath, sep } from "path";
 import type { AgentMessage, ImageContent, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
@@ -253,8 +253,6 @@ function mapScannedSession(
       ? ""
       : catalogFirstMessage(scanned.firstMessage || "(no messages)"),
     parentSessionId: originSessionId,
-    orchestration: scanned.orchestration,
-    peer: scanned.peer,
     ...(subagent
       ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: subagent.status } }
       : scanned.parentSessionPath
@@ -587,23 +585,9 @@ export function openSessionManager(
   return sm;
 }
 
-/** Resolve a Session path with bounded self-healing for scan/create races.
- *
- * @author GPT-5.6 Sol
- * @version 2.0.0
- */
-export async function resolveSessionPath(
-  sessionId: string,
-  options: { allowMissingFile?: boolean } = {},
-): Promise<string | null> {
+export async function resolveSessionPath(sessionId: string): Promise<string | null> {
   const cached = getPathCache().get(sessionId);
-  if (cached) {
-    if (existsSync(cached) && readSessionHeader(cached)?.id === sessionId) return cached;
-    // Deletion of a live runtime may target a Session that has not written its
-    // first disk entry yet; the cached path is still its authoritative target.
-    if (options.allowMissingFile) return cached;
-    invalidateSessionPathCache(sessionId);
-  }
+  if (cached) return cached;
 
   const targetedPath = await findSessionPathById(sessionId);
   if (targetedPath) {
@@ -611,20 +595,10 @@ export async function resolveSessionPath(
     return getPathCache().get(sessionId) ?? null;
   }
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    await listAllSessions();
-    const resolved = getPathCache().get(sessionId);
-    if (resolved && existsSync(resolved) && readSessionHeader(resolved)?.id === sessionId) return resolved;
-
-    // A fresh TTL result or a scan that began before creation can both miss a
-    // newly persisted external Session. Invalidate and perform a real rescan.
-    invalidateSessionListCache();
-    // Always allow one final physical rescan: an external creator does not
-    // participate in this process's generation counter and may have appeared
-    // while readdir was already in flight.
-    await Promise.resolve();
-  }
-  return null;
+  // Unknown layouts, malformed candidates, and duplicate IDs retain the
+  // existing authoritative catalogue scan instead of negative-caching a miss.
+  await listAllSessions();
+  return getPathCache().get(sessionId) ?? null;
 }
 
 export async function resolveSessionIdByPath(filePath: string): Promise<string | undefined> {

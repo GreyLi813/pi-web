@@ -129,7 +129,6 @@ test("New restores the draft after session navigation and workspace auto-restore
         cancelEventStreamGrace() {},
         closeEvents() {},
         changeFileWorkspace() {},
-        invalidateSessionLoads() {},
         isMobile: false,
         activeCwd: cwd,
         activeFileTabId: null,

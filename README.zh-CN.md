@@ -16,7 +16,6 @@
 - **两种分支方式**：**新会话**会从较早的消息创建独立会话文件；**从此处编辑**会在当前会话内创建分支。
 - **项目文件工具**：浏览和上传文件、查看 Git Diff，并预览源码、Markdown、图片、音频、PDF 和 DOCX；文件变化后会自动刷新。
 - **Git worktree**：从侧边栏切换 checkout，同时把同一仓库不同 worktree 的会话归在一起。
-- **编排工作会话**：总控会话可以创建并持续驱动独立的持久化会话，适合不受既有结论影响的 Review、Validation 和任务执行；用有上限的并发处理独立任务，并可通过 Session ID 继续任一工作会话。
 - **网页配置**：无需离开 Pi Web，即可管理 Provider 登录和 API Key、模型、模型测试、插件包及技能。
 - **英文、简体中文和繁体中文界面**：Pi Web 首次打开时跟随浏览器语言，也可从顶部栏切换语言。
 
@@ -113,9 +112,6 @@ npx @agegr/pi-web@latest
 - **共享配置**：模型面板使用 pi 的模型、设置和凭据存储，因此两种界面都能看到相关更改。
 - **文件访问边界**：文件浏览器仅能访问在 Pi Web 中选择过的工作目录，以及它已识别的项目或会话根目录；它不是通用的文件系统浏览器。
 - **Git worktree**：切换器何时显示、如何创建 worktree，以及删除会产生什么影响，见 [Pi Web 里的 Worktree](./docs/worktrees.zh-CN.md)。
-- **Fork 与会话内分支不同**：Fork 会创建新的 `.jsonl` 文件；“Edit from here” 是同一会话文件里的分支。
-- **编排工作会话不是 Fork**：工作会话从空白消息历史开始，控制关系同时绑定 controller ID 与其精确 JSONL 文件，并在侧边栏中以 worker/delegate 标识。
-- **重新打开仍保持限制**：所属编排 Host 每次冷启动都会重新应用持久化的模型、Thinking 和精确工具配置。worker 保留扩展模型注册，但禁用扩展运行时处理器和工具；直接 CLI/SDK 恢复及一切通用变更/冷启动路径都会被拒绝，但运行中的 worker 可在 UI 中只读观察；进程级租约阻止第二个运行时。取消只清理从未启动的 delegate；删除 worker 需获得跨进程租约，仍拥有 worker 的 controller 不能删除。
 
 ## 开发
 
@@ -124,7 +120,7 @@ npm install
 npm run dev
 ```
 
-仓库的隔离开发服务器运行在 [http://127.0.0.1:30142](http://127.0.0.1:30142)，并使用测试 Agent 数据。常用检查命令：
+开发服务器运行在 [http://127.0.0.1:30141](http://127.0.0.1:30141)。常用检查命令：
 
 ```bash
 npm test
@@ -142,7 +138,7 @@ npm run lint
 app/             Next.js 界面和 API 路由
 components/      React 界面组件
 hooks/           客户端状态和交互 hooks
-lib/             会话、智能体、调度、编排、模型、文件、Git 和安全逻辑
+lib/             会话、智能体、模型、文件、Git 和安全逻辑
 public/          静态资源和 PWA 文件
 bin/             npm CLI 入口及启动参数解析
 docs/            面向用户和贡献者的专题文档

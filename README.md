@@ -14,7 +14,6 @@ Local browser UI for the [pi coding agent](https://github.com/earendil-works/pi)
 - **Two ways to branch**: **New session** creates an independent session file from an earlier message; **Edit from here** creates a branch inside the current session.
 - **Project file tools**: browse and upload files, inspect Git diffs, and preview source, Markdown, images, audio, PDFs, and DOCX files with automatic refresh.
 - **Git worktrees**: switch checkouts from the sidebar while keeping sessions from the same repository grouped together.
-- **Orchestrated worker sessions**: a controller session creates and drives clean, persisted sessions for unbiased review, validation, or delegated work; run bounded independent tasks in parallel and continue any worker later by Session ID.
 - **Web-based configuration**: manage provider login and API keys, models, model tests, plugin packages, and skills without leaving Pi Web.
 - **English, Simplified Chinese, and Traditional Chinese UI**: Pi Web follows the browser language initially and provides a language switcher in the top bar.
 
@@ -114,9 +113,6 @@ npx @agegr/pi-web@latest
 - **Shared configuration**: the Models panel uses pi's model, settings, and credential storage, so changes are visible to both interfaces.
 - **File access boundary**: the file browser is limited to working directories selected in Pi Web and project or session roots it already knows about; it is not a general filesystem browser.
 - **Git worktrees**: see [Worktrees in Pi Web](./docs/worktrees.md) for switcher visibility, worktree creation, and removal behavior.
-- **Forks vs in-session branches**: Fork creates a new `.jsonl` file. "Edit from here" creates another branch inside the same session file.
-- **Orchestrated workers are not forks**: each worker starts with clean message history. Ownership binds both the controller ID and exact controller JSONL file, and the sidebar marks workers/delegates distinctly.
-- **Worker restrictions survive reopening**: persisted model, Thinking, and exact tool profiles apply on every owner-host cold open. Runtime extension handlers/tools are suppressed (extension-provided model registration remains available); direct CLI/SDK resume and generic worker mutation/startup routes are denied, while a live worker remains read-only observable in the UI; and a process-lifetime lease rejects a second runtime. Cancellation removes only never-started delegates. Running/starting Sessions cannot be deleted, worker deletion requires the cross-process lease, and controllers with owned workers cannot be deleted.
 
 ### Downstream Session Context Menu
 
@@ -177,7 +173,7 @@ npm install
 npm run dev
 ```
 
-The repository's isolated development server runs at [http://127.0.0.1:30142](http://127.0.0.1:30142) and uses test agent data. Run the common checks with:
+The development server runs at [http://127.0.0.1:30141](http://127.0.0.1:30141). Run the common checks with:
 
 ```bash
 npm test
@@ -195,7 +191,7 @@ Contributor guides: [Internationalization](./docs/i18n.md) and [Release process]
 app/             Next.js UI and API routes
 components/      React UI components
 hooks/           Client state and interaction hooks
-lib/             Session, agent, scheduling, orchestration, model, file, Git, and security logic
+lib/             Session, agent, model, file, Git, and security logic
 public/          Static assets and PWA files
 bin/             npm CLI entrypoint and launch option parsing
 docs/            Focused user and contributor guides

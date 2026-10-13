@@ -170,11 +170,7 @@ test("deleting an unpersisted session shuts down its runtime and invalidates cac
     let shutdownCalled = false;
     globalThis.__piSessions.set(id, {
       isRunning: () => false,
-      isAlive: () => true,
       isAwaitingInput: () => false,
-      reserveDeletion: () => true,
-      releaseDeletionReservation() {},
-      destroyAndWait: async () => {},
       shutdown: async () => {
         shutdownCalled = true;
         if (persistOnShutdown) await writeFile(filePath, JSON.stringify(manager.getHeader()));
@@ -319,10 +315,10 @@ test("live detail and state routes work without a persisted JSONL file", async (
   assert.equal(typeof detail.info.projectKey, "string");
   assert.deepEqual(detail.context.messages.map((message) => message.content), ["hello live"]);
   assert.equal(stateResponse.status, 200);
-  const state = await stateResponse.json();
-  assert.equal(state.running, true);
-  assert.equal(typeof state.runtimeInstanceId, "string");
-  assert.deepEqual(state.state, { isStreaming: true });
+  assert.deepEqual(await stateResponse.json(), {
+    running: true,
+    state: { isStreaming: true },
+  });
 });
 
 test("session detail returns a gzip-compressed response when the client accepts it", async (t) => {

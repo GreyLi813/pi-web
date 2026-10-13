@@ -270,7 +270,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     loading, error, messages, activeToolResults, entryIds, historyCursor, hasEarlierMessages, earlierTurnCount, streamingStore,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
-    isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats, persistedSessionId,
+    isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices, extensionDialog, waitingExtensionDialogCount, extensionCustomUi, waitingExtensionCustomUiCount, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput, setNoticePaused, addNotice,
     isAutoModelSelection,
@@ -288,7 +288,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, handleEnsureScheduleSession, handleSetDefaultModel, handleSetDefaultThinkingLevel, loadSlashCommands, scrollUserMsgToTop,
+    handleToolPresetChange, handleThinkingLevelChange, handleSetDefaultModel, handleSetDefaultThinkingLevel, loadSlashCommands, scrollUserMsgToTop,
     loadContext, activeLeafId, scrollToBottom, scrollToMessage,
   } = useAgentSession({
     session, sessionRunning, newSessionCwd, newSessionDraftKey, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd: wrappedOnAgentEnd, onToolEnd, onAttentionNeeded, onSessionCreated, onSessionForked,
@@ -937,20 +937,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
     : null;
 
-  const modelControlledOwnerId = session?.peer?.ownerSessionId ?? session?.orchestration?.ownerSessionId;
-  const chatInputElement = modelControlledOwnerId ? (
-    <div style={{
-      margin: "8px 12px 12px",
-      padding: "10px 12px",
-      border: "1px solid var(--border)",
-      borderRadius: 8,
-      color: "var(--text-muted)",
-      fontSize: 12,
-      lineHeight: 1.5,
-    }}>
-      This model-controlled Session is read-only here. Open owner Session {modelControlledOwnerId} and use its peer/worker tools to operate it safely.
-    </div>
-  ) : (
+  const chatInputElement = (
     <ChatInput
       ref={chatInputRef}
       onSend={handleSend}
@@ -982,8 +969,6 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}
-      thinkingLevelsByModel={modelThinkingLevels}
-      thinkingLevelMapsByModel={modelThinkingLevelMaps}
       savedDefaultThinkingLevel={savedDefaultThinkingLevel}
       onSetDefaultThinkingLevel={session || isNew ? handleSetDefaultThinkingLevel : undefined}
       retryInfo={retryInfo}
@@ -999,8 +984,6 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? newSessionDraftKey ?? undefined}
       cwd={session?.cwd ?? newSessionCwd}
-      sessionId={persistedSessionId}
-      onEnsureScheduleSession={handleEnsureScheduleSession}
       onAttachFiles={onAttachFiles}
     />
   );

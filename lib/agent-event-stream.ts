@@ -122,7 +122,6 @@ export function createAgentEventStream(
   req: Request,
   sessionId: string,
   sessionPromise: Promise<AgentEventStreamSession>,
-  options: { runtimeInstanceId?: string } = {},
 ): ReadableStream<Uint8Array> {
   let cancelStream: (closeController: boolean | "error") => void = () => {};
   let releaseLease: () => void = () => {};
@@ -273,7 +272,6 @@ export function createAgentEventStream(
             pendingExtensionUiIds: bufferedEvents
               .filter((event) => event.type === "extension_ui_request" && typeof event.id === "string")
               .map((event) => event.id as string),
-            ...(options.runtimeInstanceId ? { runtimeInstanceId: options.runtimeInstanceId } : {}),
           });
           for (const event of bufferedEvents) forwardEvent(event, snapshot);
           if (snapshot !== undefined && snapshot !== null) {

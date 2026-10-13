@@ -1,34 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import {
-  acquireOrchestratedSessionRuntimeLease,
-  acquireSessionFileLease,
-  acquireSessionIdentityLease,
-  createAgentSessionFromServices,
-  createAgentSessionServices,
-  createModelEndpointFingerprint,
-  createPeerSessionExtension,
-  createSessionOrchestrationExtension,
-  getAgentDir,
-  getAuthorizedPeerRuntimePolicy,
-  getSessionOrchestrationToolNames,
-  initTheme,
-  isolateOrchestratedSessionExtensions,
-  isSessionOrchestrationMetadata,
-  type LoadExtensionsResult,
-  type OrchestratedSessionRuntimeLease,
-  SessionManager,
-  PeerAuthorityStore,
-  type PeerSessionRuntimeAuthority,
-  type SessionIdentityLease,
-  type SessionOrchestrationOwnerCapability,
-  SettingsManager,
-  storeSessionTarget,
-  type StoredSessionTarget,
-  Theme,
-  verifySessionTarget,
-  verifyStoredSessionTarget,
-  type ModelRuntime,
-} from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme, type ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
@@ -39,19 +10,11 @@ import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import { findDeferredModel, rememberProviderModels } from "./deferred-provider-models";
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import {
-  cacheSessionPath,
-  catalogFirstMessage,
-  getLatestModelChange,
-  invalidateSessionListCache,
-  invalidateSessionPathCache,
-  readLatestSessionEntryId,
-  resolveSessionPath,
-} from "./session-reader";
-import {
   createProjectCommandBashExtension,
   createProjectCommandBashOperations,
   preferUserBashExtension,
 } from "./project-command-env";
+import { cacheSessionPath, catalogFirstMessage, getLatestModelChange, invalidateSessionListCache, readLatestSessionEntryId, resolveSessionPath } from "./session-reader";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { notifySessionComplete } from "./web-push";
 import { hasActiveSessionLivenessProvider } from "./session-liveness";
@@ -66,8 +29,6 @@ import type {
   SessionMessageEntry,
 } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS, type HeadlessCustomUiTui } from "./custom-ui-terminal";
-import { createWebSessionOrchestrationHost, type WebSessionOrchestrationHost } from "./session-orchestration-host";
-import { createWebPeerSessionHooks } from "./peer-session-hooks";
 import {
   createSubagentExtension,
   preferPiWebSubagentExtension,
@@ -85,7 +46,6 @@ import { createSubagentController } from "./subagent-runtime";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
-import { withTranscriptSystemPrompt } from "./agent-system-prompt";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
 import { createPiWebBuiltinExtensions, createSubagentCodemodeExtension, createSubagentMcpExtensions } from "./builtin-extensions";
 import type { McpHost } from "./mcp-host";
@@ -174,42 +134,6 @@ type AgentSessionWrapperOptions = {
   chatOnlyExtensionModel?: { provider: string; id: string };
 };
 
-type ExtensionBindingOptions = {
-  forceEmptySystemPrompt?: boolean;
-};
-
-type PromptRunHandle = {
-  runId: string;
-  runEpoch: number;
-  completion: Promise<void>;
-};
-
-const RUNNING_STATE_EVENT_TYPES = new Set([
-  "agent_start",
-  "agent_end",
-  "agent_settled",
-  "auto_compaction_start",
-  "auto_compaction_end",
-  "compaction_start",
-  "compaction_end",
-]);
-
-const RUN_EPOCH_EVENT_TYPES = new Set([
-  "agent_start",
-  "agent_end",
-  "agent_settled",
-  "message_start",
-  "message_update",
-  "message_end",
-  "tool_execution_start",
-  "tool_execution_update",
-  "tool_execution_end",
-  "auto_retry_start",
-  "auto_retry_end",
-  "prompt_done",
-  "prompt_error",
-]);
-
 /**
  * Chat only loads no extensions, so a provider one registers is missing from its runtime (#804).
  * Said instead of "Model not found", or pi's "No API key found" for a session left without a model.
@@ -228,9 +152,6 @@ const IDLE_RESET_EVENT_TYPES = new Set([
   "auto_compaction_end",
   "compaction_end",
 ]);
-
-const ORCHESTRATION_OWNER_HOST_CAPABILITY = Symbol("orchestration-owner-host");
-const PEER_OWNER_HOST_CAPABILITY = Symbol("peer-owner-host");
 
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -294,36 +215,12 @@ const COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT = new Set([
   "extension_ui_input",
 ]);
 
-export interface StartRpcSessionOptions {
+export interface RpcSessionStartOptions {
   toolNames?: string[];
   initialModel?: { provider: string; modelId: string };
   allowInitialModelFallback?: boolean;
   thinkingLevel?: ThinkingLevel;
-  includeExtensionTools?: boolean;
-  enableSessionOrchestration?: boolean;
-  preserveSystemPromptWithoutTools?: boolean;
-  /** Internal identity proving that WebSessionOrchestrationHost validated ownership. */
-  orchestrationOwnerHostCapability?: symbol;
-  /** Opaque authority minted by the active owning controller extension. */
-  orchestrationOwnerCapability?: SessionOrchestrationOwnerCapability;
-  /** Internal identity proving that peer authority was checked by a host path. */
-  peerOwnerHostCapability?: symbol;
-  /** Opaque host-side authority binding a peer's complete runtime policy. */
-  peerSessionRuntime?: PeerSessionRuntimeAuthority;
-  /** Previously verified physical identity that must survive startup TOCTOU. */
-  expectedSessionTarget?: StoredSessionTarget;
 }
-
-export interface PersistedRuntimePolicy {
-  kind?: "orchestration" | "peer";
-  toolNames: string[];
-  model?: { provider: string; modelId: string };
-  thinkingLevel?: string;
-  endpointFingerprint?: string;
-  projectTrusted?: boolean;
-}
-
-export type OrchestratedRuntimePolicy = PersistedRuntimePolicy;
 
 const CODING_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
 const THINKING_LEVEL_NAMES = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -407,10 +304,6 @@ export class AgentSessionWrapper {
   private extensionUiAbortController = new AbortController();
   private extensionStatuses = new Map<string, string>();
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
-  private promptRunning = false;
-  private scheduledPromptStarting = false;
-  private pendingRunAdmissions = 0;
-  private promptCompletion: Promise<void> | null = null;
   private activeExtensionWidgets = new Map<string, ActiveExtensionWidget>();
   private extensionWidgetGenerations = new Map<string, number>();
   private extensionWidgetsResetting = false;
@@ -421,13 +314,9 @@ export class AgentSessionWrapper {
   // Whether the last run ended because it was stopped (pi 1.1's `agent_settled.aborted`), not finished.
   private lastRunAborted = false;
   private promptAdmissionTail: Promise<void> = Promise.resolve();
-  private runEpoch = 0;
-  private activeRunId: string | null = null;
-  private activeRunEpoch: number | null = null;
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
   private extensionBindingError: unknown = null;
-  private forceEmptySystemPrompt = false;
   private readonly exactSystemPrompt?: () => string;
   private readonly chatOnly: boolean;
   private readonly onAgentRunComplete?: AgentRunCompleteListener;
@@ -439,9 +328,7 @@ export class AgentSessionWrapper {
   private mcpPromptWait: { controller: AbortController; done: Promise<void> } | null = null;
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
-  private onDestroyCallback: (() => void | Promise<void>) | null = null;
-  private destroyCompletion: Promise<void> | null = null;
-  private deletionReserved = false;
+  private onDestroyCallback: (() => void) | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private sessionShutdownEmitted = false;
   private forceShutdownOnIdle = false;
@@ -456,10 +343,6 @@ export class AgentSessionWrapper {
 
   constructor(
     public readonly inner: AgentSessionLike,
-    private readonly runtimePolicy?: PersistedRuntimePolicy,
-    private readonly startupExactToolNames?: readonly string[],
-    private readonly ensureSessionLease?: () => Promise<void>,
-    private readonly runtimeTarget?: StoredSessionTarget | (() => StoredSessionTarget | undefined),
     options: AgentSessionWrapperOptions = {},
   ) {
     this.exactSystemPrompt = options.exactSystemPrompt;
@@ -468,11 +351,6 @@ export class AgentSessionWrapper {
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
     this.mcpHost = options.mcpHost;
     this.chatOnlyExtensionModel = options.chatOnlyExtensionModel;
-    // An exact system prompt reaches the model through the inline `before_agent_start`
-    // handler (lib/exact-system-prompt.ts) that the session's resource loader registers,
-    // and the transcript keeps recording Pi's structured sections. Since Pi 0.86 the
-    // SDK prompt state is a getter replayed from those messages, so the wrapper must
-    // neither assign it nor patch the agent's turn hooks.
   }
 
   get sessionId(): string {
@@ -495,24 +373,6 @@ export class AgentSessionWrapper {
     return this.inner.isStreaming;
   }
 
-  private currentRuntimeTarget(): StoredSessionTarget | undefined {
-    return typeof this.runtimeTarget === "function" ? this.runtimeTarget() : this.runtimeTarget;
-  }
-
-  get sessionFileKey(): string | undefined {
-    return this.currentRuntimeTarget()?.fileKey;
-  }
-
-  /** Verify that an internal owner path still addresses this exact physical Session.
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  matchesSessionTarget(target: StoredSessionTarget): boolean {
-    return this.sessionId === target.sessionId
-      && resolve(this.sessionFile) === resolve(target.sessionFile)
-      && this.currentRuntimeTarget()?.fileKey === target.fileKey;
-  }
-
   /**
    * False from the moment shutdown() or destroy() begins, not only once the SDK
    * session is disposed: extensions may take up to the shutdown deadline to
@@ -522,63 +382,8 @@ export class AgentSessionWrapper {
     return this._alive && !this.closing;
   }
 
-  /** Atomically prevent new commands when an idle Session is about to be deleted.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  reserveDeletion(): boolean {
-    if (!this._alive || this.deletionReserved || this.isRunning()) return false;
-    this.deletionReserved = true;
-    return true;
-  }
-
-  /** Reopen command admission when deletion fails before unlinking the Session.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  releaseDeletionReservation(): void {
-    this.deletionReserved = false;
-  }
-
-  /** Report whether persisted orchestration policy governs this wrapper.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  isOrchestratedWorker(): boolean {
-    return this.runtimePolicy !== undefined && this.runtimePolicy.kind !== "peer";
-  }
-
-  /** Report whether durable peer policy governs this wrapper.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  isPeerSession(): boolean {
-    return this.runtimePolicy?.kind === "peer";
-  }
-
-  /** Report whether model-facing mutations require a dedicated owner path.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  isRestrictedModelControlledSession(): boolean {
-    return this.runtimePolicy !== undefined;
-  }
-
   isRunning(): boolean {
-    return this._alive && (
-      this.pendingRunAdmissions > 0
-      || this.scheduledPromptStarting
-      || this.promptRunning
-      || this.pendingPromptCount > 0
-      || this.inner.isStreaming
-      || this.inner.isCompacting
-      || this.inner.isBashRunning
-    );
+    return this._alive && (this.pendingPromptCount > 0 || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning);
   }
 
   /**
@@ -619,18 +424,8 @@ export class AgentSessionWrapper {
     return this.suppressCompletionNotifications;
   }
 
-  /** Subscribe to SDK events and attach the active server run identity.
-   *
-   * @author GPT-5.6 Sol
-   * @version 2.0.0
-   */
   start(): void {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
-      if (event.type === "agent_start" && this.activeRunId === null) {
-        this.runEpoch += 1;
-        this.activeRunId = `extension-${randomUUID()}`;
-        this.activeRunEpoch = this.runEpoch;
-      }
       if (event.type === "agent_start") {
         this.agentRunNeedsCompletion = true;
         this.lastRunAborted = false;
@@ -643,48 +438,10 @@ export class AgentSessionWrapper {
       }
       this.trackActiveToolEvent(event);
       if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
-      this.emit(this.withRunIdentity(event));
-      if (RUNNING_STATE_EVENT_TYPES.has(event.type)) notifyRunningChange();
-      if (event.type === "agent_settled" && this.promptCompletion === null) this.clearActiveRun();
+      this.emit(event);
       if (event.type === "agent_settled") this.notifyAgentRunCompleteIfIdle();
     });
     this.resetIdleTimer();
-    notifyRunningChange();
-  }
-
-  /** Add the current run epoch to events that can mutate client prompt state.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  private withRunIdentity(event: AgentEvent): AgentEvent {
-    if (!RUN_EPOCH_EVENT_TYPES.has(event.type) || this.activeRunId === null || this.activeRunEpoch === null) {
-      return event;
-    }
-    return { ...event, runId: this.activeRunId, runEpoch: this.activeRunEpoch };
-  }
-
-  /** Clear one active run without changing the monotonic epoch.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  private clearActiveRun(runId?: string, runEpoch?: number): void {
-    if (runId !== undefined && this.activeRunId !== runId) return;
-    if (runEpoch !== undefined && this.activeRunEpoch !== runEpoch) return;
-    this.activeRunId = null;
-    this.activeRunEpoch = null;
-  }
-
-  setForceEmptySystemPrompt(force: boolean): void {
-    this.forceEmptySystemPrompt = force;
-    this.applyForcedEmptySystemPrompt();
-  }
-
-  private applyForcedEmptySystemPrompt(): void {
-    if (this.forceEmptySystemPrompt && this.inner.agent.state) {
-      this.inner.agent.state.messages = withTranscriptSystemPrompt(this.inner.agent.state.messages, "");
-    }
   }
 
   /**
@@ -725,8 +482,8 @@ export class AgentSessionWrapper {
     return { type: "prompt_done", ...(this.lastRunAborted ? { aborted: true } : {}) };
   }
 
-  beginExtensionBinding(options: ExtensionBindingOptions = {}): void {
-    void this.ensureExtensionsBound(options).catch((err) => {
+  beginExtensionBinding(): void {
+    void this.ensureExtensionsBound().catch((err) => {
       console.error("[pi-web] failed to dispatch session_start to extensions:", err instanceof Error ? err.message : err);
     });
   }
@@ -766,12 +523,8 @@ export class AgentSessionWrapper {
     return !controller.signal.aborted;
   }
 
-  private ensureExtensionsBound(options: ExtensionBindingOptions = {}): Promise<void> {
-    if (options.forceEmptySystemPrompt) this.forceEmptySystemPrompt = true;
-    if (this.extensionsBound) {
-      this.applyForcedEmptySystemPrompt();
-      return Promise.resolve();
-    }
+  private ensureExtensionsBound(): Promise<void> {
+    if (this.extensionsBound) return Promise.resolve();
     if (this.extensionBindingPromise) return this.extensionBindingPromise;
 
     this.extensionBindingError = null;
@@ -808,7 +561,6 @@ export class AgentSessionWrapper {
         this.inner.extensionRunner.setUIContext?.(uiContext, "rpc");
       }
       this.extensionsBound = true;
-      this.applyForcedEmptySystemPrompt();
       console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
     })().catch((err) => {
       this.extensionBindingError = err;
@@ -846,36 +598,10 @@ export class AgentSessionWrapper {
 
   private shouldWaitForExtensions(type: string): boolean {
     return type === "prompt"
-      || type === "scheduled_prompt"
-      || type === "orchestrated_prompt"
-      || type === "peer_prompt_and_wait"
       || type === "steer"
       || type === "follow_up"
-      || type === "get_tools"
-      || type === "get_schedule_policy"
-      || type === "set_tools"
-      || type === "set_tools_exact"
       || type === "get_commands"
       || type === "get_state";
-  }
-
-  /** Reapply an exact initial tool set after extensions register tools.
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  private applyStartupExactTools(): void {
-    if (!this.runtimePolicy && this.startupExactToolNames) {
-      this.inner.setActiveToolsByName([...this.startupExactToolNames]);
-    }
-  }
-
-  private async withFinalRunningNotification<T>(operation: () => Promise<T>): Promise<T> {
-    try {
-      return await operation();
-    } finally {
-      this.resetIdleTimer();
-      notifyRunningChange();
-    }
   }
 
   private async withFinalIdleReset<T>(operation: () => Promise<T>): Promise<T> {
@@ -917,12 +643,9 @@ export class AgentSessionWrapper {
   }
 
   private emit(event: AgentEvent): void {
-    const identified = RUN_EPOCH_EVENT_TYPES.has(event.type)
-      ? { ...event, runtimeInstanceId: getRpcRuntimeInstanceId() }
-      : event;
     for (const listener of this.listeners) {
       try {
-        listener(identified);
+        listener(event);
       } catch (error) {
         console.error(
           `[pi-web] failed to deliver ${event.type} event:`,
@@ -961,9 +684,7 @@ export class AgentSessionWrapper {
     this.forcedIdleTimerArmed = timeoutMs !== 0 && this.forceShutdownOnIdle;
     if (timeoutMs === 0) return;
     this.idleTimer = setTimeout(() => {
-      // A visible chat keeps an SSE listener attached so server-dispatched
-      // schedules can stream into that page even after a long idle period.
-      if (!this.forceShutdownOnIdle && (this.isRunning() || this.listeners.size > 0 || hasActiveSessionLivenessProvider({
+      if (!this.forceShutdownOnIdle && (this.isRunning() || hasActiveSessionLivenessProvider({
         sessionId: this.sessionId,
         sessionFile: this.sessionFile || undefined,
       }))) {
@@ -1005,284 +726,8 @@ export class AgentSessionWrapper {
     };
   }
 
-  onDestroy(cb: () => void | Promise<void>): void {
+  onDestroy(cb: () => void): void {
     this.onDestroyCallback = cb;
-  }
-
-  /** Allocate one monotonic run identity, optionally checking a caller's expected epoch.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  private allocateRun(command: Record<string, unknown>): { runId: string; runEpoch: number } {
-    if (this.activeRunId !== null) throw new Error("Another prompt run is already active");
-    const runId = typeof command.runId === "string" && command.runId.trim()
-      ? command.runId
-      : randomUUID();
-    const runEpoch = this.runEpoch + 1;
-    if (
-      command.runEpoch !== undefined
-      && (!Number.isSafeInteger(command.runEpoch) || command.runEpoch !== runEpoch)
-    ) {
-      throw new Error(`Prompt run epoch changed; expected ${runEpoch}`);
-    }
-    this.runEpoch = runEpoch;
-    this.activeRunId = runId;
-    this.activeRunEpoch = runEpoch;
-    return { runId, runEpoch };
-  }
-
-  /** Begin one atomic prompt-and-wait run and retain its exact completion promise.
-   *
-   * @author GPT-5.6 Sol
-   * @version 2.0.0
-   */
-  private async beginPrompt(command: Record<string, unknown>): Promise<PromptRunHandle> {
-    if (this.inner.isBashRunning) throw new Error("Cannot send a prompt while a shell command is running");
-    await this.ensureSessionLease?.();
-    const identity = this.allocateRun(command);
-    const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-    const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
-    this.promptRunning = true;
-    notifyRunningChange();
-
-    let innerCompletion: Promise<void>;
-    try {
-      innerCompletion = this.inner.prompt(command.message as string, {
-        ...(promptImages?.length ? { images: promptImages } : {}),
-        ...(streamingBehavior ? { streamingBehavior } : {}),
-        source: "rpc",
-      });
-    } catch (error) {
-      this.promptRunning = false;
-      this.clearActiveRun(identity.runId, identity.runEpoch);
-      notifyRunningChange();
-      throw error;
-    }
-
-    const completion = innerCompletion
-      .catch((error) => {
-        invalidateSessionListCache();
-        this.emit(this.withRunIdentity({
-          type: "prompt_error",
-          errorMessage: error instanceof Error ? error.message : String(error),
-        }));
-        throw error;
-      })
-      .finally(async () => {
-        await this.ensureSessionLease?.().catch((error) => {
-          this.emit(this.withRunIdentity({
-            type: "prompt_error",
-            errorMessage: `Session lease failed: ${error instanceof Error ? error.message : String(error)}`,
-          }));
-        });
-        this.promptRunning = false;
-        if (this.promptCompletion === completion) this.promptCompletion = null;
-        if (!streamingBehavior) this.emit(this.withRunIdentity({ type: "prompt_done" }));
-        this.clearActiveRun(identity.runId, identity.runEpoch);
-        this.notifyAgentRunCompleteIfIdle();
-        notifyRunningChange();
-      });
-    this.promptCompletion = completion;
-    return { ...identity, completion };
-  }
-
-  /** Start a browser prompt without blocking its HTTP request after acceptance.
-   *
-   * @author GPT-5.6 Sol
-   * @version 2.0.0
-   */
-  private async startPrompt(command: Record<string, unknown>): Promise<{ runId: string; runEpoch: number }> {
-    const run = await this.beginPrompt(command);
-    void run.completion.catch(() => {
-      // Error details are emitted to SSE by beginPrompt().
-    });
-    return { runId: run.runId, runEpoch: run.runEpoch };
-  }
-
-  /** Reject completed worker turns whose final assistant message failed or aborted.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  private assertLastAssistantSucceeded(): void {
-    for (let index = this.inner.messages.length - 1; index >= 0; index--) {
-      const message = this.inner.messages[index];
-      if (message.role !== "assistant") continue;
-      if (message.stopReason === "error") throw new Error(message.errorMessage || "Worker model failed");
-      if (message.stopReason === "aborted") throw new Error("Worker prompt was aborted");
-      return;
-    }
-    throw new Error("Worker completed without an assistant response");
-  }
-
-  /** Read bounded usage from the terminal assistant message of the current run.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  private getLastAssistantUsage(): { inputTokens: number; outputTokens: number; costUsd?: number } | undefined {
-    for (let index = this.inner.messages.length - 1; index >= 0; index--) {
-      const message = this.inner.messages[index];
-      if (message.role !== "assistant" || !message.usage) continue;
-      return {
-        inputTokens: message.usage.input ?? 0,
-        outputTokens: message.usage.output ?? 0,
-        costUsd: message.usage.cost?.total,
-      };
-    }
-    return undefined;
-  }
-
-  /** Resolve and apply one model without recursively re-entering command admission.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  private async setModel(provider: string, modelId: string): Promise<{ id: string; provider: string }> {
-    let model = this.inner.modelRuntime.getModel(provider, modelId);
-    if (!model) {
-      await this.inner.modelRuntime.refresh({ allowNetwork: false });
-      model = this.inner.modelRuntime.getModel(provider, modelId);
-    }
-    if (!model) {
-      throw this.chatOnly && findDeferredModel(this.inner.modelRuntime as ModelRuntime, provider, modelId)
-        ? chatOnlyExtensionModelError(provider, modelId)
-        : new Error(`Model not found: ${provider}/${modelId}`);
-    }
-    await this.inner.setModel(model);
-    invalidateModelsCache();
-    invalidateSessionListCache();
-    return { id: model.id, provider: model.provider };
-  }
-
-  /** Calculate an endpoint fingerprint only for a complete registered model.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  private endpointFingerprint(model: AgentSessionLike["model"]): string | undefined {
-    if (!model || typeof model.baseUrl !== "string" || typeof model.api !== "string") return undefined;
-    return createModelEndpointFingerprint(model);
-  }
-
-  /** Apply one Thinking level while preserving DeepSeek's xhigh compatibility.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  private setThinkingLevel(level: string): void {
-    this.inner.setThinkingLevel(level);
-    if (level === "xhigh" && (this.inner.model as { compat?: { thinkingFormat?: string } } | null)?.compat?.thinkingFormat === "deepseek" && this.inner.agent?.state) {
-      this.inner.agent.state.thinkingLevel = "xhigh";
-    }
-    invalidateSessionListCache();
-  }
-
-  /** Reject changes that conflict with a durable worker or peer policy.
-   *
-   * @author GPT-5.6 Sol
-   * @version 2.0.0
-   */
-  private assertRuntimeSettings(settings: {
-    modelProvider?: string;
-    modelId?: string;
-    thinkingLevel?: string;
-    toolNames?: string[];
-    endpointFingerprint?: string;
-  }): void {
-    const policy = this.runtimePolicy;
-    if (!policy) return;
-    const label = policy.kind === "peer" ? "peer Session" : "orchestrated worker";
-    if (settings.modelProvider || settings.modelId) {
-      if (
-        !policy.model
-        || settings.modelProvider !== policy.model.provider
-        || settings.modelId !== policy.model.modelId
-      ) {
-        throw new Error(`A ${label}'s model cannot be changed`);
-      }
-    }
-    if (
-      settings.thinkingLevel
-      && settings.thinkingLevel !== "auto"
-      && policy.thinkingLevel
-      && settings.thinkingLevel !== policy.thinkingLevel
-    ) {
-      throw new Error(`A ${label}'s Thinking level cannot be changed`);
-    }
-    if (settings.toolNames !== undefined) {
-      const requested = [...new Set(settings.toolNames)].sort();
-      const allowed = [...new Set(policy.toolNames)].sort();
-      if (requested.length !== allowed.length || requested.some((name, index) => name !== allowed[index])) {
-        throw new Error(`A ${label}'s tool policy cannot be changed`);
-      }
-    }
-    if (
-      settings.endpointFingerprint
-      && policy.endpointFingerprint
-      && settings.endpointFingerprint !== policy.endpointFingerprint
-    ) {
-      throw new Error(`A ${label}'s endpoint authorization cannot be changed`);
-    }
-  }
-
-  /** Reapply persisted restrictions immediately before every model turn.
-   *
-   * @author GPT-5.6 Sol
-   * @version 2.0.0
-   */
-  private async applyRuntimePolicy(): Promise<void> {
-    const policy = this.runtimePolicy;
-    if (!policy) return;
-    if (
-      policy.model
-      && (this.inner.model?.provider !== policy.model.provider || this.inner.model?.id !== policy.model.modelId)
-    ) {
-      await this.setModel(policy.model.provider, policy.model.modelId);
-    }
-    if (policy.model && policy.endpointFingerprint && this.inner.model) {
-      const fingerprint = this.endpointFingerprint(this.inner.model);
-      if (fingerprint !== policy.endpointFingerprint) {
-        throw new Error(`Model endpoint authorization changed for ${policy.model.provider}/${policy.model.modelId}`);
-      }
-    }
-    if (policy.thinkingLevel && this.inner.agent.state?.thinkingLevel !== policy.thinkingLevel) {
-      this.setThinkingLevel(policy.thinkingLevel);
-    }
-    this.inner.setActiveToolsByName(policy.toolNames);
-    this.setForceEmptySystemPrompt(false);
-  }
-
-  /** Atomically apply exact model, endpoint, Thinking, and tool policy before a run.
-   *
-   * @author GPT-5.6 Sol
-   * @version 2.0.0
-   */
-  private async applyPromptSettings(settings: {
-    modelProvider?: string;
-    modelId?: string;
-    thinkingLevel?: string;
-    toolNames?: string[];
-    endpointFingerprint?: string;
-  }): Promise<void> {
-    if (Boolean(settings.modelProvider) !== Boolean(settings.modelId)) {
-      throw new Error("Prompt has an incomplete model configuration");
-    }
-    this.assertRuntimeSettings(settings);
-    if (settings.modelProvider && settings.modelId) {
-      await this.setModel(settings.modelProvider, settings.modelId);
-    }
-    if (settings.endpointFingerprint) {
-      if (this.endpointFingerprint(this.inner.model) !== settings.endpointFingerprint) {
-        throw new Error("Prompt endpoint authorization does not match the active model");
-      }
-    }
-    if (settings.thinkingLevel && settings.thinkingLevel !== "auto") {
-      this.setThinkingLevel(settings.thinkingLevel);
-    }
-    if (settings.toolNames !== undefined) this.inner.setActiveToolsByName([...new Set(settings.toolNames)]);
-    await this.applyRuntimePolicy();
   }
 
   /**
@@ -1330,7 +775,6 @@ export class AgentSessionWrapper {
   }
 
   async send(command: Record<string, unknown>): Promise<unknown> {
-    if (!this._alive || this.deletionReserved) throw new Error("Session runtime is closed or being deleted");
     const type = command.type as string;
     const allowedDuringReplacement = COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT.has(type);
     if (this.sessionReplacement && !allowedDuringReplacement) {
@@ -1340,18 +784,6 @@ export class AgentSessionWrapper {
       throw new Error(`Cannot ${type} while another session command is running`);
     }
 
-    const reservesRunAdmission = (type === "prompt" && this.runtimePolicy !== undefined)
-      || type === "scheduled_prompt"
-      || type === "orchestrated_prompt"
-      || type === "peer_prompt_and_wait"
-      || type === "compact"
-      || type === "bash";
-    if (reservesRunAdmission) {
-      if (this.isRunning()) throw new Error("Cannot start another run while the session is busy");
-      this.pendingRunAdmissions++;
-      notifyRunningChange();
-    }
-
     const tracksMutation = !allowedDuringReplacement;
     if (tracksMutation) this.activeMutatingCommands += 1;
 
@@ -1359,27 +791,10 @@ export class AgentSessionWrapper {
       // Status reconciliation must not postpone forced cleanup after Stop.
       if (type !== "get_state") this.resetIdleTimer();
       if (this.shouldWaitForExtensions(type)) await this.waitForExtensionsBound();
-      if (!this._alive || this.deletionReserved) {
-        throw new Error("Session runtime was closed or reserved for deletion before the command started");
-      }
       if (this.sessionReplacement && !allowedDuringReplacement) {
         throw new Error("Session is being copied to a new session");
       }
-      if (this.ensureSessionLease) await this.ensureSessionLease();
-    } catch (error) {
-      if (reservesRunAdmission) {
-        this.pendingRunAdmissions--;
-        notifyRunningChange();
-      }
-      if (tracksMutation) this.activeMutatingCommands = Math.max(0, this.activeMutatingCommands - 1);
-      throw error;
-    }
-    if (reservesRunAdmission) {
-      this.pendingRunAdmissions--;
-      notifyRunningChange();
-    }
 
-    try {
       if (type === "prompt" || type === "steer" || type === "follow_up") {
         const imageError = validateAgentImages(command.images);
         if (imageError) throw new Error(imageError);
@@ -1394,22 +809,9 @@ export class AgentSessionWrapper {
 
       switch (type) {
       case "prompt": {
-        // Worker and peer runtimes stay strictly serialized under their
-        // persisted policy. Ordinary browser sessions retain Pi 0.84's
-        // preflight admission and streaming queue behavior below.
-        if (this.runtimePolicy) {
-          if (this.isRunning()) throw new Error("Cannot send a prompt while the session is busy");
-          this.scheduledPromptStarting = true;
-          notifyRunningChange();
-          try {
-            await this.applyRuntimePolicy();
-            return await this.startPrompt(command);
-          } finally {
-            this.scheduledPromptStarting = false;
-            notifyRunningChange();
-          }
-        }
-
+        // Serialize only admission. Once the preceding prompt has either
+        // passed or failed preflight, the SDK can atomically decide whether
+        // this submission starts a run or joins its streaming queue.
         const releaseAdmission = await this.acquirePromptAdmission();
         try {
           if (this.inner.isBashRunning) {
@@ -1424,15 +826,6 @@ export class AgentSessionWrapper {
           }
           const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
           const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
-          const startsPrimaryRun = !streamingBehavior && this.activeRunId === null;
-          const identity = startsPrimaryRun
-            ? this.allocateRun(command)
-            : {
-                runId: this.activeRunId ?? (typeof command.runId === "string" ? command.runId : randomUUID()),
-                runEpoch: this.activeRunEpoch ?? this.runEpoch,
-              };
-          if (startsPrimaryRun) this.promptRunning = true;
-
           let preflightAccepted = false;
           let preflightSettled = false;
           let promptSettled = false;
@@ -1440,24 +833,26 @@ export class AgentSessionWrapper {
           let acceptPreflight!: () => void;
           let releasePreflight!: () => void;
           let rejectPreflight!: (error: unknown) => void;
-          const preflight = new Promise<void>((resolvePreflight, reject) => {
+          const preflight = new Promise<void>((resolve, reject) => {
             // A started run always ends with agent_settled, so the wrapper may expect one.
             acceptPreflight = () => {
               preflightAccepted = true;
               this.agentRunNeedsCompletion = true;
               if (preflightSettled) return;
               preflightSettled = true;
-              resolvePreflight();
+              // A new prompt, not one queued into a run: what an earlier run's Stop said is over.
+              if (!streamingBehavior) this.lastRunAborted = false;
+              resolve();
             };
-            // "queued" and "handled" inputs start no run, so no agent_settled can follow.
-            // Release the RPC caller without arming completion; otherwise the session
-            // stays "running" forever waiting for a settle that never arrives.
-            // @author GPT-5.6 Sol
-            // @version 1.0.0
+            // "queued" (a steer/follow-up into a streaming run) and "handled" (an
+            // extension command or input handler consumed the prompt) start no run,
+            // so no agent_settled can follow. Release the RPC caller without arming
+            // completion, or the session stays "running" forever waiting for a
+            // settle that never arrives and rejects every later prompt as busy.
             releasePreflight = () => {
               if (preflightSettled) return;
               preflightSettled = true;
-              resolvePreflight();
+              resolve();
             };
             rejectPreflight = (error) => {
               if (preflightSettled) return;
@@ -1509,9 +904,13 @@ export class AgentSessionWrapper {
               ...(promptImages?.length ? { images: promptImages } : {}),
               ...(streamingBehavior ? { streamingBehavior } : {}),
               source: "rpc",
+              // Match pi's RPC contract: acknowledge only after synchronous prompt
+              // validation and extension preflight have accepted the submission.
+              // A rejected prompt never calls this and rejects `prompt` instead.
+              // Only a "started" disposition begins a run that ends with
+              // agent_settled; "queued" and "handled" were accepted without one.
               preflightResult: (disposition) => {
                 preflightDisposition = disposition;
-                // Only "started" begins a run that ends with agent_settled.
                 if (disposition === "started") {
                   acceptPreflight();
                   return;
@@ -1521,47 +920,33 @@ export class AgentSessionWrapper {
             });
           } catch (error) {
             finishPrompt();
-            if (startsPrimaryRun) {
-              this.promptRunning = false;
-              this.clearActiveRun(identity.runId, identity.runEpoch);
-            }
             throw error;
           }
 
           void prompt.then(() => {
-            // Keep the fallback arm only for prompts that really start a run. A queued or
-            // extension-handled input resolves here too, but must not arm completion.
+            // Compatibility fallback if a future SDK resolves without invoking
+            // the internal callback. Keep the fallback arm only for prompts that
+            // really start a run: a queued or handled prompt resolves here too,
+            // and must not arm a completion that will never arrive.
             if (preflightDisposition === "queued" || preflightDisposition === "handled") {
               releasePreflight();
             } else {
               acceptPreflight();
             }
-            if (startsPrimaryRun) this.promptRunning = false;
             finishPrompt();
-            if (!streamingBehavior) {
-              this.emit(this.withRunIdentity(this.promptDoneEvent()));
-              this.clearActiveRun(identity.runId, identity.runEpoch);
-              notifyRunningChange();
-            }
+            if (!streamingBehavior) this.emit(this.promptDoneEvent());
           }, (error) => {
             rejectPreflight(error);
-            if (startsPrimaryRun && !preflightAccepted) {
-              this.promptRunning = false;
-              this.clearActiveRun(identity.runId, identity.runEpoch);
-            }
             finishPrompt();
             invalidateSessionListCache();
+            // A preflight rejection is returned by the POST itself. Only an
+            // unexpected failure after acceptance needs the asynchronous event.
             if (preflightAccepted) {
-              this.emit(this.withRunIdentity({
+              this.emit({
                 type: "prompt_error",
                 errorMessage: error instanceof Error ? error.message : String(error),
-              }));
-              if (!streamingBehavior) {
-                this.promptRunning = false;
-                this.emit(this.withRunIdentity(this.promptDoneEvent()));
-                this.clearActiveRun(identity.runId, identity.runEpoch);
-                notifyRunningChange();
-              }
+              });
+              if (!streamingBehavior) this.emit(this.promptDoneEvent());
             }
           }).catch((error) => {
             console.error(
@@ -1571,91 +956,10 @@ export class AgentSessionWrapper {
           });
 
           await preflight;
-          return identity;
+          return null;
         } finally {
           releaseAdmission();
         }
-      }
-
-      case "scheduled_prompt": {
-        if (this.isRunning()) throw new Error("Cannot start a scheduled prompt while the session is busy");
-        if (this.isOrchestratedWorker()) throw new Error("Orchestrated workers cannot receive schedules");
-        const settings = command as {
-          message: string;
-          modelProvider?: string;
-          modelId?: string;
-          thinkingLevel?: string;
-          toolNames?: string[];
-          endpointFingerprint?: string;
-          runId?: string;
-          runEpoch?: number;
-        };
-        this.scheduledPromptStarting = true;
-        notifyRunningChange();
-        try {
-          await this.applyPromptSettings(settings);
-          const run = await this.beginPrompt({ ...settings, type: "prompt" });
-          await run.completion;
-          this.assertLastAssistantSucceeded();
-          return {
-            text: this.inner.getLastAssistantText() ?? "",
-            runId: run.runId,
-            runEpoch: run.runEpoch,
-            usage: this.getLastAssistantUsage(),
-          };
-        } finally {
-          this.scheduledPromptStarting = false;
-          notifyRunningChange();
-        }
-      }
-
-      case "orchestrated_prompt":
-      case "peer_prompt_and_wait": {
-        const peerPrompt = type === "peer_prompt_and_wait";
-        if (this.isRunning()) throw new Error("Cannot prompt the Session while it is busy");
-        if (peerPrompt && !this.isPeerSession()) throw new Error("Target is not a durable peer Session");
-        const settings = command as {
-          message: string;
-          modelProvider?: string;
-          modelId?: string;
-          thinkingLevel?: string;
-          toolNames?: string[];
-          endpointFingerprint?: string;
-          runId?: string;
-          runEpoch?: number;
-        };
-        this.scheduledPromptStarting = true;
-        notifyRunningChange();
-        try {
-          await this.applyPromptSettings(settings);
-          const run = await this.beginPrompt({ ...settings, type: "prompt" });
-          await run.completion;
-          this.assertLastAssistantSucceeded();
-          return {
-            text: this.inner.getLastAssistantText() ?? "",
-            runId: run.runId,
-            runEpoch: run.runEpoch,
-            usage: this.getLastAssistantUsage(),
-          };
-        } finally {
-          this.scheduledPromptStarting = false;
-          notifyRunningChange();
-        }
-      }
-
-      case "cancel_run": {
-        const runId = command.runId;
-        const runEpoch = command.runEpoch;
-        if (
-          typeof runId !== "string"
-          || !Number.isSafeInteger(runEpoch)
-          || runId !== this.activeRunId
-          || runEpoch !== this.activeRunEpoch
-        ) {
-          return { cancelled: false };
-        }
-        await this.withFinalRunningNotification(() => this.inner.abort());
-        return { cancelled: true };
       }
 
       case "abort":
@@ -1684,18 +988,13 @@ export class AgentSessionWrapper {
         return {
           sessionId: this.inner.sessionId,
           sessionFile: this.inner.sessionFile ?? "",
-          runtimeInstanceId: getRpcRuntimeInstanceId(),
-          runEpoch: this.runEpoch,
-          runId: this.activeRunId,
           isStreaming: this.inner.isStreaming,
-          isPromptRunning: this.promptRunning || this.scheduledPromptStarting || this.pendingPromptCount > 0,
+          isPromptRunning: this.pendingPromptCount > 0,
           isBashRunning: this.inner.isBashRunning,
           isCompacting: this.inner.isCompacting,
           autoCompactionEnabled: this.inner.autoCompactionEnabled,
           autoRetryEnabled: this.inner.autoRetryEnabled,
           model: model ? { id: model.id, provider: model.provider } : undefined,
-          endpointFingerprint: this.endpointFingerprint(model),
-          activeToolNames: [...this.inner.getActiveToolNames()],
           messageCount: 0,
           pendingMessageCount: this.inner.pendingMessageCount,
           queuedMessages: {
@@ -1720,16 +1019,24 @@ export class AgentSessionWrapper {
       }
 
       case "set_model": {
-        if (this.isRunning()) throw new Error("Cannot change model while the session is busy");
         const { provider, modelId } = command as { provider: string; modelId: string };
-        this.assertRuntimeSettings({ modelProvider: provider, modelId });
-        return await this.setModel(provider, modelId);
+        let model = this.inner.modelRuntime.getModel(provider, modelId);
+        if (!model) {
+          await this.inner.modelRuntime.refresh({ allowNetwork: false });
+          model = this.inner.modelRuntime.getModel(provider, modelId);
+        }
+        if (!model) {
+          throw this.chatOnly && findDeferredModel(this.inner.modelRuntime as ModelRuntime, provider, modelId)
+            ? chatOnlyExtensionModelError(provider, modelId)
+            : new Error(`Model not found: ${provider}/${modelId}`);
+        }
+        await this.inner.setModel(model);
+        invalidateModelsCache();
+        invalidateSessionListCache();
+        return { id: model.id, provider: model.provider };
       }
 
       case "fork": {
-        if (this.isOrchestratedWorker()) {
-          throw new Error("Orchestrated workers cannot be forked through the generic Session API");
-        }
         if (this.inner.isBashRunning) {
           throw new Error("Cannot fork while a shell command is running");
         }
@@ -1821,7 +1128,7 @@ export class AgentSessionWrapper {
         if (!sessionManager.isPersisted() || !leafId || !branchHasAssistant) return { cancelled: true };
         if (!currentSessionFile || !existsSync(currentSessionFile)) return { cancelled: true };
 
-        return await this.withSessionReplacement("clone", async () => {
+        return this.withSessionReplacement("clone", async () => {
           const sessionDir = sessionManager.getSessionDir();
           const sourceManager = SessionManager.open(currentSessionFile, sessionDir);
           const clonedPath = sourceManager.createBranchedSession(leafId);
@@ -1843,15 +1150,19 @@ export class AgentSessionWrapper {
       }
 
       case "set_thinking_level": {
-        if (this.isRunning()) throw new Error("Cannot change Thinking level while the session is busy");
         const level = command.level as string;
-        this.assertRuntimeSettings({ thinkingLevel: level });
-        this.setThinkingLevel(level);
+        this.inner.setThinkingLevel(level);
+        // setThinkingLevel clamps xhigh→high for models where supportsXhigh()===false.
+        // If the model has DeepSeek thinking compat (reasoningEffortMap maps xhigh→max),
+        // force the state back so the compat layer can use it correctly.
+        if (level === "xhigh" && (this.inner.model as { compat?: { thinkingFormat?: string } } | null)?.compat?.thinkingFormat === "deepseek" && this.inner.agent?.state) {
+          this.inner.agent.state.thinkingLevel = "xhigh";
+        }
+        invalidateSessionListCache();
         return null;
       }
 
       case "compact": {
-        if (this.isRunning()) throw new Error("Cannot compact while the session is busy");
         try {
           return await this.withFinalIdleReset(() =>
             this.inner.compact(command.customInstructions as string | undefined)
@@ -1862,27 +1173,11 @@ export class AgentSessionWrapper {
       }
 
       case "set_session_name": {
-        if (typeof command.name !== "string") throw new Error("Session name must be a string");
-        const name = command.name.trim();
+        const name = (command.name as string | undefined)?.trim();
+        if (!name) throw new Error("Session name cannot be empty");
         this.inner.setSessionName(name);
         invalidateSessionListCache();
         return null;
-      }
-
-      case "close_session": {
-        if (this.isRunning()) throw new Error("Cannot close a Session while it is busy");
-        await this.shutdown();
-        return null;
-      }
-
-      case "persist_session": {
-        if (this.isRunning()) throw new Error("Cannot persist an empty session while it is busy");
-        const sessionFile = this.inner.sessionManager.persistSession();
-        if (!sessionFile) throw new Error("Session persistence is disabled");
-        cacheSessionPath(this.inner.sessionId, sessionFile);
-        invalidateSessionListCache();
-        await this.ensureSessionLease?.();
-        return { sessionFile };
       }
 
       case "get_session_stats": {
@@ -1894,33 +1189,6 @@ export class AgentSessionWrapper {
 
       case "get_last_assistant_text": {
         return { text: this.inner.getLastAssistantText() ?? "" };
-      }
-
-      case "get_schedule_policy": {
-        const requested = command as { modelProvider?: string; modelId?: string; thinkingLevel?: string };
-        if (Boolean(requested.modelProvider) !== Boolean(requested.modelId)) {
-          throw new Error("Schedule model selection is incomplete");
-        }
-        this.assertRuntimeSettings({
-          modelProvider: requested.modelProvider,
-          modelId: requested.modelId,
-          thinkingLevel: requested.thinkingLevel,
-        });
-        const selectedModel = requested.modelProvider && requested.modelId
-          ? this.inner.modelRuntime.getModel(requested.modelProvider, requested.modelId)
-          : this.inner.model;
-        if (requested.modelProvider && requested.modelId && !selectedModel) {
-          throw new Error(`Model not found: ${requested.modelProvider}/${requested.modelId}`);
-        }
-        return {
-          version: 1,
-          toolNames: [...(this.runtimePolicy?.toolNames ?? this.inner.getActiveToolNames())],
-          model: selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.id } : undefined,
-          thinkingLevel: requested.thinkingLevel && requested.thinkingLevel !== "auto"
-            ? requested.thinkingLevel
-            : (this.runtimePolicy?.thinkingLevel ?? this.inner.agent.state?.thinkingLevel ?? "off"),
-          endpointFingerprint: this.endpointFingerprint(selectedModel),
-        };
       }
 
       case "set_auto_compaction": {
@@ -1935,18 +1203,12 @@ export class AgentSessionWrapper {
       }
 
       case "steer": {
-        if (this.scheduledPromptStarting) {
-          throw new Error("Cannot steer a scheduled or orchestrated prompt");
-        }
         const steerImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         await this.inner.steer(command.message as string, steerImages?.length ? steerImages : undefined);
         return null;
       }
 
       case "follow_up": {
-        if (this.scheduledPromptStarting) {
-          throw new Error("Cannot queue a follow-up for a scheduled or orchestrated prompt");
-        }
         const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         await this.inner.followUp(command.message as string, followImages?.length ? followImages : undefined);
         return null;
@@ -2001,34 +1263,8 @@ export class AgentSessionWrapper {
       }
 
       case "set_tools": {
-        if (this.isRunning()) throw new Error("Cannot change tools while the session is busy");
         const toolNames = command.toolNames as string[];
-        this.assertRuntimeSettings({ toolNames });
-        if (this.runtimePolicy) {
-          this.setForceEmptySystemPrompt(false);
-          this.inner.setActiveToolsByName(this.runtimePolicy.toolNames);
-        } else {
-          this.setForceEmptySystemPrompt(toolNames.length === 0);
-          this.setActiveToolSelection(toolNames);
-        }
-        this.applyForcedEmptySystemPrompt();
-        return null;
-      }
-
-      case "set_tools_exact": {
-        if (this.isRunning()) throw new Error("Cannot change tools while the session is busy");
-        const toolNames = command.toolNames as string[];
-        this.assertRuntimeSettings({ toolNames });
-        const forceEmpty = !this.runtimePolicy
-          && toolNames.length === 0
-          && command.preserveSystemPrompt !== true;
-        this.setForceEmptySystemPrompt(forceEmpty);
-        if (this.runtimePolicy) {
-          this.inner.setActiveToolsByName(this.runtimePolicy.toolNames);
-        } else {
-          this.setActiveToolSelection(toolNames);
-        }
-        this.applyForcedEmptySystemPrompt();
+        this.setActiveToolSelection(toolNames);
         return null;
       }
 
@@ -2054,7 +1290,6 @@ export class AgentSessionWrapper {
           this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
         }
         invalidateModelsCache();
-        await this.applyRuntimePolicy();
         return { success: true };
       }
 
@@ -2079,17 +1314,7 @@ export class AgentSessionWrapper {
       }
 
       case "bash": {
-        if (this.runtimePolicy && !this.runtimePolicy.toolNames.includes("bash")) {
-          throw new Error("This persisted runtime policy does not allow shell commands");
-        }
-        if (
-          this.scheduledPromptStarting
-          || this.promptRunning
-          || this.pendingPromptCount > 0
-          || this.inner.isStreaming
-          || this.inner.isCompacting
-          || this.inner.isBashRunning
-        ) {
+        if (this.pendingPromptCount > 0 || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning) {
           throw new Error("Cannot run a shell command while the session is busy");
         }
         const execution = this.inner.executeBash(
@@ -2158,18 +1383,13 @@ export class AgentSessionWrapper {
     this.pendingUiRequests.clear();
     this.activeToolEvents.clear();
     this.clearExtensionWidgets(false);
+
     const finishDispose = () => {
       try {
-        this.inner.dispose?.();
+        this.inner.dispose();
       } finally {
-        this.destroyCompletion = (async () => {
-          await this.inner.waitForRuntimeCleanup?.();
-          await this.onDestroyCallback?.();
-        })().catch(() => {
-          // Registry/lease cleanup is best-effort during process shutdown.
-        });
+        this.onDestroyCallback?.();
         this.resolveDisposed();
-        notifyRunningChange();
       }
     };
 
@@ -2198,24 +1418,6 @@ export class AgentSessionWrapper {
       .finally(finishDispose);
   }
 
-  /** Atomically close only a still-empty wrapper with no admitted or active work.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  async shutdownIfIdleAndEmpty(): Promise<boolean> {
-    if (!this.reserveDeletion()) return false;
-    try {
-      const hasRuntimeMessages = this.inner.messages.length > 0;
-      const hasPersistedMessages = this.inner.sessionManager.getBranch().some((entry) => entry.type === "message");
-      if (hasRuntimeMessages || hasPersistedMessages) return false;
-      await this.shutdown();
-      return true;
-    } finally {
-      if (this._alive) this.releaseDeletionReservation();
-    }
-  }
-
   async shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     if (!this._alive) return;
@@ -2242,20 +1444,9 @@ export class AgentSessionWrapper {
         }
       } finally {
         this.destroy();
-        await this.destroyCompletion;
       }
     })();
     return this.shutdownPromise;
-  }
-
-  /** Destroy an idle wrapper and wait for registry/lease cleanup before unlinking its file.
-   *
-   * @author GPT-5.6 Sol
-   * @version 1.0.0
-   */
-  async destroyAndWait(): Promise<void> {
-    this.destroy();
-    await this.destroyCompletion;
   }
 
   /**
@@ -2605,7 +1796,7 @@ export class AgentSessionWrapper {
       stopSignal.addEventListener("abort", onStop, { once: true });
 
       Promise.resolve()
-        .then(() => (completed || stopSignal.aborted) ? undefined : factory(tui, PLAIN_TEXT_THEME, CUSTOM_UI_KEYBINDINGS, done))
+        .then(() => completed ? undefined : factory(tui, PLAIN_TEXT_THEME, CUSTOM_UI_KEYBINDINGS, done))
         .then((component) => {
           if (completed) {
             try {
@@ -2863,8 +2054,7 @@ export class AgentSessionWrapper {
 
   private syncProjectTrust(): void {
     const status = getProjectTrustStatus(this.cwd, getAgentDir());
-    const policyAllowsTrust = this.runtimePolicy?.kind !== "peer" || this.runtimePolicy.projectTrusted === true;
-    this.inner.settingsManager.setProjectTrusted(status.trusted && policyAllowsTrust);
+    this.inner.settingsManager.setProjectTrusted(status.trusted);
   }
 }
 
@@ -2872,29 +2062,10 @@ export class AgentSessionWrapper {
 // Session registry
 // ============================================================================
 
-export interface RpcSessionStartResult {
-  session: AgentSessionWrapper;
-  realSessionId: string;
-  /** True only for the caller that actually constructed and registered this wrapper. */
-  created: boolean;
-}
-
 declare global {
   var __piSessions: Map<string, AgentSessionWrapper> | undefined;
-  var __piStartLocks: Map<string, Promise<RpcSessionStartResult>> | undefined;
-  var __piDeletingSessions: Set<string> | undefined;
+  var __piStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
   var __piStartingSessionCwds: Map<string, number> | undefined;
-  var __piRunningListeners: Set<(ids: string[]) => void> | undefined;
-  var __piRpcRuntimeInstanceId: string | undefined;
-}
-
-/** Return one random epoch namespace for the lifetime of this Node process.
- * @author GPT-5.6 Sol
- * @version 1.0.0
- */
-export function getRpcRuntimeInstanceId(): string {
-  globalThis.__piRpcRuntimeInstanceId ??= randomUUID();
-  return globalThis.__piRpcRuntimeInstanceId;
 }
 
 function getRegistry(): Map<string, AgentSessionWrapper> {
@@ -2937,7 +2108,7 @@ function registerRpcWrapper(wrapper: AgentSessionWrapper): void {
 const SUBAGENT_CONTROLLER = createSubagentController({
   getSession: (sessionId) => getRegistry().get(sessionId),
   registerSession: (inner, options) => {
-    const wrapper = new AgentSessionWrapper(inner, undefined, undefined, undefined, undefined, {
+    const wrapper = new AgentSessionWrapper(inner, {
       ...(options?.exactSystemPrompt !== undefined
         ? { exactSystemPrompt: options.exactSystemPrompt }
         : {}),
@@ -2967,14 +2138,9 @@ export function abortSubagent(sessionId: string) {
   return SUBAGENT_CONTROLLER.abort(sessionId);
 }
 
-function getLocks(): Map<string, Promise<RpcSessionStartResult>> {
+function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> {
   if (!globalThis.__piStartLocks) globalThis.__piStartLocks = new Map();
   return globalThis.__piStartLocks;
-}
-
-function getDeletingSessions(): Set<string> {
-  if (!globalThis.__piDeletingSessions) globalThis.__piDeletingSessions = new Set();
-  return globalThis.__piDeletingSessions;
 }
 
 const CLOSING_SESSION_WAIT_MARGIN_MS = 1_000;
@@ -3033,86 +2199,8 @@ function trackStartingSession(cwd: string): () => void {
   };
 }
 
-export interface RpcSessionDeletionReservation {
-  session?: AgentSessionWrapper;
-  release(): void;
-}
-
-/** Reserve one idle Session against concurrent startup and command admission.
- *
- * @author GPT-5.6 Sol
- * @version 1.0.0
- */
-export function reserveRpcSessionDeletion(sessionId: string): RpcSessionDeletionReservation | undefined {
-  const deleting = getDeletingSessions();
-  if (deleting.has(sessionId) || getLocks().has(sessionId)) return undefined;
-  const session = getRegistry().get(sessionId);
-  if (session?.isAlive() && !session.reserveDeletion()) return undefined;
-  deleting.add(sessionId);
-  let released = false;
-  return {
-    session,
-    release: () => {
-      if (released) return;
-      released = true;
-      deleting.delete(sessionId);
-      session?.releaseDeletionReservation();
-    },
-  };
-}
-
 export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {
   return getRegistry().get(sessionId);
-}
-
-let webSessionOrchestrationHost: WebSessionOrchestrationHost | undefined;
-
-/** Read persisted model/Thinking entries without building the full message context.
- *
- * @author Kimi K3
- * @version 1.0.0
- */
-function readPersistedStartupSettings(sessionManager: SessionManager): {
-  model?: { provider: string; modelId: string };
-  thinkingLevel?: ThinkingLevel;
-} {
-  let model: { provider: string; modelId: string } | undefined;
-  let thinkingLevel: ThinkingLevel | undefined;
-  for (const entry of sessionManager.getBranch()) {
-    if (entry.type === "model_change") {
-      model = { provider: entry.provider, modelId: entry.modelId };
-    } else if (entry.type === "thinking_level_change") {
-      thinkingLevel = entry.thinkingLevel as ThinkingLevel;
-    }
-  }
-  return { model, thinkingLevel };
-}
-
-/** Reuse one Pi-Web orchestration adapter over the hot-reload-safe RPC registry.
- *
- * @author GPT-5.6 Sol
- * @version 1.0.0
- */
-function getWebSessionOrchestrationHost(): WebSessionOrchestrationHost {
-  webSessionOrchestrationHost ??= createWebSessionOrchestrationHost({
-    startSession: async (sessionId, sessionFile, cwd, toolNames, ownerCapability) => {
-      const { session } = await startRpcSession(sessionId, sessionFile, cwd, {
-        toolNames,
-        includeExtensionTools: false,
-        enableSessionOrchestration: false,
-        preserveSystemPromptWithoutTools: true,
-        orchestrationOwnerHostCapability: ORCHESTRATION_OWNER_HOST_CAPABILITY,
-        orchestrationOwnerCapability: ownerCapability,
-      });
-      await session.send({ type: "set_tools_exact", toolNames, preserveSystemPrompt: true });
-      return session;
-    },
-    getSession: (sessionId) => getRpcSession(sessionId),
-    cacheSessionPath,
-    invalidateSessionPath: invalidateSessionPathCache,
-    invalidateSessionList: invalidateSessionListCache,
-  });
-  return webSessionOrchestrationHost;
 }
 
 export interface SetRpcSessionToolsResult {
@@ -3263,7 +2351,6 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
       modified: new Date(lastActivityMs).toISOString(),
       messageCount: messages.length,
       firstMessage: catalogFirstMessage(firstUserMessage ? runtimeMessageText(firstUserMessage) || "(no messages)" : "(no messages)"),
-      orchestration: header?.orchestration,
       ...(subagent ? {
         parentSessionId: subagent.parentSessionId,
         relation: {
@@ -3305,49 +2392,6 @@ export function getRunningRpcSessionIds(): string[] {
   return [...ids];
 }
 
-// ----------------------------------------------------------------------------
-// Running-status broadcaster
-//
-// Pushes the current set of running session ids to subscribers whenever any
-// session's running state may have changed. Listeners live on globalThis so
-// they survive Next.js hot-reload.
-// ----------------------------------------------------------------------------
-
-function getRunningListeners(): Set<(ids: string[]) => void> {
-  if (!globalThis.__piRunningListeners) globalThis.__piRunningListeners = new Set();
-  return globalThis.__piRunningListeners;
-}
-
-/** Subscribe to running-session-id changes. Returns an unsubscribe function. */
-export function subscribeRunningSessions(listener: (ids: string[]) => void): () => void {
-  const listeners = getRunningListeners();
-  listeners.add(listener);
-  return () => { listeners.delete(listener); };
-}
-
-let lastRunningSnapshot = "";
-
-/**
- * Recompute the running-session-id set and, if it changed since the last
- * notification, broadcast it to subscribers.
- */
-export function notifyRunningChange(): void {
-  const listeners = getRunningListeners();
-  if (listeners.size === 0) {
-    // A future subscriber receives its own initial snapshot. Clear this one so
-    // its first state transition cannot match stale state from an old listener.
-    lastRunningSnapshot = "";
-    return;
-  }
-  const ids = getRunningRpcSessionIds();
-  const snapshot = JSON.stringify([...ids].sort());
-  if (snapshot === lastRunningSnapshot) return;
-  lastRunningSnapshot = snapshot;
-  for (const listener of listeners) {
-    try { listener(ids); } catch { /* ignore listener errors */ }
-  }
-}
-
 /**
  * The running sessions parked on an extension's dialog, a subset of
  * getRunningRpcSessionIds(): same poll, so the sidebar can tell a run that needs
@@ -3382,547 +2426,288 @@ export async function startRpcSession(
   sessionId: string,
   sessionFile: string,
   cwd: string | undefined,
-  options: StartRpcSessionOptions = {},
-): Promise<RpcSessionStartResult> {
+  options: RpcSessionStartOptions = {},
+): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const { initialModel, allowInitialModelFallback, thinkingLevel } = options;
   const requestedToolNames = options.toolNames === undefined
     ? undefined
     : validateSessionToolSelection(options.toolNames);
   const registry = getRegistry();
   const locks = getLocks();
-  if (getDeletingSessions().has(sessionId)) {
-    throw new Error(`Session ${sessionId} is being deleted`);
-  }
 
-  const ownerHostAuthorized = options.orchestrationOwnerHostCapability === ORCHESTRATION_OWNER_HOST_CAPABILITY;
-  const peerHostAuthorized = options.peerOwnerHostCapability === PEER_OWNER_HOST_CAPABILITY;
   const existing = registry.get(sessionId);
-  if (existing?.isAlive()) {
-    if (existing.isOrchestratedWorker() && !ownerHostAuthorized) {
-      throw new Error("Orchestrated workers can only be started through their owning controller Session");
-    }
-    if (existing.isPeerSession() && !peerHostAuthorized) {
-      throw new Error("Peer Sessions can only be started through their owning controller authority");
-    }
-    if (options.expectedSessionTarget && !existing.matchesSessionTarget(options.expectedSessionTarget)) {
-      throw new Error("Live Session wrapper does not match the expected physical identity");
-    }
-    return { session: existing, realSessionId: sessionId, created: false };
-  }
+  if (existing?.isAlive()) return { session: existing, realSessionId: sessionId };
 
   const inflight = locks.get(sessionId);
-  if (inflight) {
-    const result = await inflight;
-    if (result.session.isOrchestratedWorker() && !ownerHostAuthorized) {
-      throw new Error("Orchestrated workers can only be started through their owning controller Session");
-    }
-    if (result.session.isPeerSession() && !peerHostAuthorized) {
-      throw new Error("Peer Sessions can only be started through their owning controller authority");
-    }
-    if (options.expectedSessionTarget && !result.session.matchesSessionTarget(options.expectedSessionTarget)) {
-      throw new Error("Started Session wrapper does not match the expected physical identity");
-    }
-    return { ...result, created: false };
-  }
+  if (inflight) return inflight;
 
   const closingWait = closingRpcSessionWait(sessionId);
   if (closingWait) {
     // Concurrent starts share this lock, then the one start that follows it.
-    const waiting: Promise<RpcSessionStartResult> = closingWait.then(() => {
+    const waiting: Promise<{ session: AgentSessionWrapper; realSessionId: string }> = closingWait.then(() => {
       if (locks.get(sessionId) === waiting) locks.delete(sessionId);
       return startRpcSession(sessionId, sessionFile, cwd, options);
     });
     locks.set(sessionId, waiting);
     return waiting;
   }
-  let finishStartingSession: () => void = () => undefined;
+
+  let sessionManager: SessionManager;
+  if (sessionFile) {
+    sessionManager = SessionManager.open(sessionFile, undefined);
+  } else {
+    if (!cwd) throw new Error("cwd is required for a new session");
+    sessionManager = SessionManager.create(cwd, undefined);
+  }
+  const sessionCwd = sessionManager.getCwd();
+  const sessionEntries = sessionManager.getEntries() as unknown as SessionEntry[];
+  const hasPersistedSubagentSnapshot = sessionFile && hasSubagentResourceSnapshot(sessionEntries);
+  const subagentResources = sessionFile
+    ? readSubagentSessionResources(sessionEntries)
+    : null;
+  if (hasPersistedSubagentSnapshot && !subagentResources) {
+    throw new Error("Invalid subagent resource snapshot");
+  }
+  const persistedToolNames = subagentResources
+    ? undefined
+    : readSessionToolSelection(sessionEntries);
+  const selectedToolNames = subagentResources?.tools ?? persistedToolNames ?? requestedToolNames;
+  if (!subagentResources && persistedToolNames === undefined && requestedToolNames !== undefined) {
+    appendSessionToolSelection(sessionManager, requestedToolNames);
+  }
+  const subagentLoadsResources = Boolean(
+    subagentResources?.loadExtensions || subagentResources?.loadSkills || subagentResources?.codemode || subagentResources?.mcp,
+  );
+  const chatOnly = selectedToolNames?.length === 0 && !subagentLoadsResources;
+  const finishStartingSession = trackStartingSession(sessionCwd);
   const starting = (async () => {
-    let sessionManager: SessionManager;
-    let startupTarget: Awaited<ReturnType<typeof verifySessionTarget>> | undefined;
-    if (sessionFile) {
-      if (options.expectedSessionTarget) {
-        if (
-          options.expectedSessionTarget.sessionId !== sessionId
-          || resolve(options.expectedSessionTarget.sessionFile) !== resolve(sessionFile)
-        ) {
-          throw new Error("Expected Session identity does not match the startup request");
-        }
-        startupTarget = await verifyStoredSessionTarget(options.expectedSessionTarget);
-      } else {
-        startupTarget = await verifySessionTarget({ sessionId, sessionFile });
-      }
-      sessionManager = SessionManager.open(startupTarget.sessionFile, startupTarget.sessionDir);
-    } else {
-      if (!cwd) throw new Error("cwd is required for a new session");
-      sessionManager = SessionManager.create(cwd, undefined);
-    }
-    const sessionCwd = sessionManager.getCwd();
-    finishStartingSession = trackStartingSession(sessionCwd);
-
-    const sessionEntries = sessionManager.getEntries() as unknown as SessionEntry[];
-    const subagentResources = sessionFile ? readSubagentSessionResources(sessionEntries) : null;
-    if (sessionFile && hasSubagentResourceSnapshot(sessionEntries) && !subagentResources) {
-      throw new Error("Invalid subagent resource snapshot");
-    }
-    const persistedToolNames = subagentResources ? undefined : readSessionToolSelection(sessionEntries);
-    const selectedToolNames = subagentResources?.tools ?? persistedToolNames ?? requestedToolNames;
-    if (!subagentResources && persistedToolNames === undefined && requestedToolNames !== undefined) {
-      appendSessionToolSelection(sessionManager, requestedToolNames);
-    }
-    const subagentLoadsResources = Boolean(
-      subagentResources?.loadExtensions || subagentResources?.loadSkills || subagentResources?.codemode || subagentResources?.mcp,
-    );
-    const chatOnly = selectedToolNames?.length === 0 && !subagentLoadsResources;
-
     // Some extensions access the SDK's global theme even outside the terminal UI.
     if (!chatOnly) initTheme();
     const agentDir = getAgentDir();
-    const header = sessionManager.getHeader();
-    const metadata = header?.orchestration;
-    if (metadata !== undefined && !isSessionOrchestrationMetadata(metadata)) {
-      throw new Error("Orchestrated worker metadata is invalid");
-    }
-    const orchestrationPolicy: PersistedRuntimePolicy | undefined = isSessionOrchestrationMetadata(metadata)
-      ? {
-          kind: "orchestration",
-          toolNames: getSessionOrchestrationToolNames(metadata.toolProfile),
-          model: metadata.model,
-          thinkingLevel: metadata.thinkingLevel,
-        }
-      : undefined;
-    const storedPeerAuthority = startupTarget
-      ? (await new PeerAuthorityStore(agentDir).read()).authorities.find((entry) => (
-          entry.peerTarget.sessionId === startupTarget.sessionId
-          && entry.peerTarget.fileKey === startupTarget.fileKey
-        ))
-      : undefined;
-    if (storedPeerAuthority && header?.peer === undefined) {
-      throw new Error("Peer Session host authority exists but its Session metadata is missing");
-    }
-    let peerStartupPolicy: ReturnType<typeof getAuthorizedPeerRuntimePolicy> | undefined;
-    if (header?.peer !== undefined) {
-      if (!peerHostAuthorized || !startupTarget) {
-        throw new Error("Peer Sessions can only be started through their owning controller authority");
-      }
-      peerStartupPolicy = getAuthorizedPeerRuntimePolicy(options.peerSessionRuntime, startupTarget);
-    }
-    if (orchestrationPolicy && peerStartupPolicy) {
-      throw new Error("A Session cannot be both an orchestrated worker and a peer");
-    }
-    const runtimePolicy: PersistedRuntimePolicy | undefined = orchestrationPolicy ?? (peerStartupPolicy
-      ? { kind: "peer", ...peerStartupPolicy }
-      : undefined);
-    if (
-      orchestrationPolicy
-      && !ownerHostAuthorized
-    ) {
-      throw new Error("Orchestrated workers can only be started through their owning controller Session");
-    }
-    let orchestrationLease: OrchestratedSessionRuntimeLease | undefined;
-    let sessionLease: SessionIdentityLease | undefined;
-    let runtimeTarget = startupTarget ? storeSessionTarget(startupTarget) : undefined;
-    let sessionIdentityVerified = false;
-    let sessionLeasePromise: Promise<void> | undefined;
-    let startingWrapper: AgentSessionWrapper | undefined;
 
-    /** Acquire and retain the shared lease once a generic Session file exists.
-     *
-     * @author GPT-5.6 Sol
-     * @version 1.0.0
-     */
-    const ensureGenericSessionLease = async (): Promise<void> => {
-      if (orchestrationPolicy) return;
-      if (sessionIdentityVerified) {
-        if (runtimeTarget) await verifyStoredSessionTarget(runtimeTarget);
-        return;
-      }
-      if (sessionLeasePromise) return sessionLeasePromise;
-      const currentFile = sessionManager.getSessionFile();
-      sessionLeasePromise = (async () => {
-        if (!sessionLease) {
-          if (currentFile && existsSync(currentFile)) {
-            const target = runtimeTarget
-              ? await verifyStoredSessionTarget(runtimeTarget)
-              : await verifySessionTarget({
-                  sessionId: sessionManager.getSessionId(),
-                  sessionFile: currentFile,
-                  sessionDir: sessionManager.getSessionDir(),
-                  cwd: sessionManager.getCwd(),
-                  rejectOrchestration: true,
-                });
-            const fileLease = await acquireSessionFileLease(target, "runtime");
-            sessionLease = fileLease;
-            runtimeTarget = storeSessionTarget(fileLease.target);
-            sessionManager = SessionManager.open(fileLease.target.sessionFile, fileLease.target.sessionDir);
-            sessionIdentityVerified = true;
-            return;
-          }
-          sessionLease = await acquireSessionIdentityLease(
-            sessionManager.getSessionId(),
-            sessionManager.getSessionDir(),
-            "runtime",
-          );
-        }
-        if (currentFile && existsSync(currentFile)) {
-          const target = runtimeTarget
-            ? await verifyStoredSessionTarget(runtimeTarget)
-            : await verifySessionTarget({
-                sessionId: sessionManager.getSessionId(),
-                sessionFile: currentFile,
-                sessionDir: sessionManager.getSessionDir(),
-                cwd: sessionManager.getCwd(),
-                rejectOrchestration: true,
-              });
-          runtimeTarget = storeSessionTarget(target);
-          sessionManager = SessionManager.open(target.sessionFile, target.sessionDir);
-          sessionIdentityVerified = true;
-        }
-      })().finally(() => { sessionLeasePromise = undefined; });
-      return sessionLeasePromise;
-    };
+    // Determine which tools to pass based on requested toolNames.
+    // Since v0.68.0, session creation expects string[] tool names instead of Tool[] instances.
+    // A subagent's tools come from its snapshot (subagentToolOptions() below).
+    let toolsOption: string[] | undefined;
+    if (!subagentResources && selectedToolNames !== undefined) {
+      // toolNames === [] -> "all off" (an empty allow-list disables every tool).
+      // Otherwise DO NOT pass a builtin-only allow-list: passing CODING_TOOL_NAMES
+      // set allowedToolNames to coding builtins only, which filtered every
+      // extension/package-provided tool (e.g. subagents, web access) out of the
+      // tool registry — so they were unavailable in Pi Web sessions even though the
+      // `pi` CLI keeps them. Leaving the allow-list unset lets the SDK register all
+      // tools (and activate extension tools); we narrow the ACTIVE set below.
+      toolsOption = selectedToolNames.length === 0 ? [] : undefined;
+    }
 
-    try {
-      if (orchestrationPolicy) {
-        orchestrationLease = await acquireOrchestratedSessionRuntimeLease(
-          sessionManager,
-          options.orchestrationOwnerCapability,
-        );
-      } else {
-        await ensureGenericSessionLease();
-      }
-
-      // Persisted worker/peer policy overrides every browser-provided tool option.
-      const effectiveToolNames = runtimePolicy?.toolNames ?? selectedToolNames;
-      const includeExtensionTools = runtimePolicy ? false : options.includeExtensionTools !== false;
-      // Determine which tools to pass based on requested toolNames.
-      // Since v0.68.0, session creation expects string[] tool names instead of Tool[] instances.
-      let toolsOption: string[] | undefined;
-      if (subagentResources) {
-        toolsOption = subagentResources.tools;
-      } else if (effectiveToolNames !== undefined) {
-        // toolNames === [] -> "all off" (an empty allow-list disables every tool).
-        // Otherwise DO NOT pass a builtin-only allow-list: passing CODING_TOOL_NAMES
-        // set allowedToolNames to coding builtins only, which filtered every
-        // extension/package-provided tool (e.g. subagents, web access) out of the
-        // tool registry — so they were unavailable in Pi Web sessions even though the
-        // `pi` CLI keeps them. Leaving the allow-list unset lets the SDK register all
-        // tools (and activate extension tools); we narrow the ACTIVE set below.
-        toolsOption = effectiveToolNames.length === 0 || !includeExtensionTools ? effectiveToolNames : undefined;
-      }
-
-      // Restricted workers never regain orchestration tools; peers keep the
-      // bounded peer/orchestration tool surface their durable policy allows.
-      const enableSessionOrchestration = !orchestrationPolicy
-        && !subagentResources
-        && !chatOnly
-        && options.enableSessionOrchestration !== false;
-      const peerTrustAllowed = runtimePolicy?.kind === "peer"
-        ? runtimePolicy.projectTrusted === true && getProjectTrustStatus(sessionCwd, agentDir).trusted
-        : undefined;
-      const trustReloadOptions = subagentResources
-        ? subagentLoadsResources
-          ? projectTrustReloadOptions(sessionCwd, agentDir)
-          : undefined
-        : chatOnly
-          ? undefined
-          : peerTrustAllowed === false
-            ? { resolveProjectTrust: async () => false }
-            : projectTrustReloadOptions(sessionCwd, agentDir);
-      const settingsManager = peerTrustAllowed === undefined
-        ? SettingsManager.create(sessionCwd, agentDir)
-        : SettingsManager.create(sessionCwd, agentDir, { projectTrusted: peerTrustAllowed });
-      // Chat-only sessions and subagents that replace Pi's prompt send an exact
-      // system prompt. The prompt is resolved at prompt time through this inline
-      // extension: it may read the session's context files, which exist only
-      // after the session is created, so the getter is filled in below.
-      const exactSystemPromptRef: { current?: () => string } = {};
-      const exactSystemPromptExtension = createExactSystemPromptExtension(() => exactSystemPromptRef.current?.());
-      // codemode, tool-search, and mcp, as the pi CLI loads them, and the host that decides
-      // which MCP servers the session connects (ADR 0006).
-      const builtins = subagentResources || chatOnly
+    // Build services first so extension-registered providers are available
+    // before the SDK restores the saved model from the session file.
+    // Gate untrusted project extensions so opening a repository does not run
+    // its .pi/extensions code automatically (see lib/project-trust.ts, #236).
+    const trustReloadOptions = subagentResources
+      ? subagentLoadsResources
+        ? projectTrustReloadOptions(sessionCwd, agentDir)
+        : undefined
+      : chatOnly
         ? undefined
-        : await createPiWebBuiltinExtensions({ agentDir });
-      const subagentCodemode = subagentResources?.codemode
-        ? await createSubagentCodemodeExtension({
-            agentDir,
-            cwd: sessionCwd,
-            projectTrusted: () => settingsManager.isProjectTrusted(),
-          })
-        : undefined;
-      const subagentMcp = subagentResources?.mcp
-        ? await createSubagentMcpExtensions({
-            agentDir,
-            cwd: sessionCwd,
-            projectTrusted: () => settingsManager.isProjectTrusted(),
-            codemode: subagentResources.codemode === true,
-          })
-        : undefined;
-      const skillsBinding = subagentResources ? createSubagentSkillsBinding({
-        loadSkills: subagentResources.loadSkills,
-        skills: subagentResources.skills,
-        exactSystemPrompt: subagentResources.exactSystemPrompt
-          ?? (chatOnly ? subagentResources.appendSystemPrompt[0] ?? "" : undefined),
-      }) : undefined;
-      const subagentExtensionFactories = [
-        ...(subagentCodemode ? [subagentCodemode] : []),
-        ...(subagentMcp && subagentResources
-          ? [...subagentMcp.extensions, createSubagentMcpPolicyExtension(() => subagentResources)]
-          : []),
-        ...(skillsBinding?.loaderOptions.extensionFactories ?? []),
-      ];
-      const extensionFactories = [
-        ...(enableSessionOrchestration
-          ? [{
-              name: "session-orchestration",
-              factory: createSessionOrchestrationExtension(getWebSessionOrchestrationHost()),
-              hidden: true,
-            }, {
-              name: "peer-session",
-              factory: createPeerSessionExtension(createWebPeerSessionHooks({
-                agentDir,
-                startSession: async (request) => {
-                  const started = await startAuthorizedPeerRpcSession(
-                    storeSessionTarget(request.target.identity),
-                    request.target.runtimeAuthority,
-                    { toolNames: request.target.runtimeAuthority.runtime.toolNames },
-                  );
-                  return { agent: started.session, created: started.created };
-                },
-                getSession: (targetSessionId) => getRpcSession(targetSessionId),
-                invalidateSessionPath: invalidateSessionPathCache,
-              })),
-              hidden: true,
-            }]
-          : []),
-        ...(builtins?.extensions ?? []),
-        createReadOnlyMcpPolicyExtension(),
-        createProjectCommandBashExtension({ cwd: sessionCwd, settings: settingsManager }),
-        createSubagentExtension(
-          SUBAGENT_CONTROLLER.extensionRuntime,
-          () => listSubagentProfiles(sessionCwd),
-          isBuiltInSubagentsEnabled,
-        ),
-      ];
-      const resourceLoaderOptions = orchestrationPolicy
-        ? { extensionsOverride: isolateOrchestratedSessionExtensions }
-        : subagentResources
-          ? {
-              ...subagentExtensionLoaderOptions(subagentResources),
-              ...skillsBinding!.loaderOptions,
-              ...(subagentExtensionFactories.length > 0 ? { extensionFactories: subagentExtensionFactories } : {}),
-              noPromptTemplates: true,
-              noThemes: true,
-              noContextFiles: true,
-              ...(chatOnly
-                ? {
-                    systemPrompt: " ",
-                    systemPromptOverride: () => undefined,
-                  }
-                : {}),
-              appendSystemPrompt: subagentResources.appendSystemPrompt,
-            }
-          : chatOnly
-            ? { ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS, extensionFactories: [exactSystemPromptExtension] }
-            : {
-                extensionFactories,
-                extensionsOverride: (base: LoadExtensionsResult) => preferUserBashExtension(preferPiWebSubagentExtension(base)),
-              };
-      const services = await createAgentSessionServices({
-        cwd: sessionCwd,
-        agentDir,
-        settingsManager,
-        resourceLoaderOptions,
-        ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
-      });
-      if (subagentResources?.codemode
-        && !services.resourceLoader.getExtensions().extensions.some((extension) => extension.tools.has("codemode"))) {
-        throw new Error("Code mode is unavailable: builtin:codemode was not registered");
-      }
-      const scope = await resolveVisibleModels(
-        services.modelRuntime,
-        services.settingsManager.getEnabledModels(),
-      );
-      // A provider an extension registers only at session_start (lib/deferred-provider-models.ts)
-      // has no model in this runtime yet: build on the default, switch once extensions are bound.
-      const deferredInitialModel = initialModel && !services.modelRuntime.getModel(initialModel.provider, initialModel.modelId)
-        ? findDeferredModel(services.modelRuntime, initialModel.provider, initialModel.modelId)
-        : undefined;
-      // Chat only loads no extensions, so that switch never comes: refuse the model the browser chose.
-      if (chatOnly && deferredInitialModel && !allowInitialModelFallback) {
-        throw chatOnlyExtensionModelError(deferredInitialModel.provider, deferredInitialModel.id);
-      }
-      const effectiveInitialModel = initialModel && !deferredInitialModel && (
-        !allowInitialModelFallback
-        || scope.visible.some((model) => model.provider === initialModel.provider && model.id === initialModel.modelId)
-      )
-        ? initialModel
-        : undefined;
-      const defaultProvider = services.settingsManager.getDefaultProvider();
-      const defaultModelId = services.settingsManager.getDefaultModel();
-      const branch = sessionManager.getBranch();
-      // System messages carry the prompt and tool loadout, not a conversation.
-      const hasExistingMessages = branch.some((entry) => entry.type === "message" && entry.message.role !== "system");
-      // A persisted session's own model/Thinking entries win over the settings default
-      // when the caller did not explicitly request a startup model.
-      const persistedSettings = hasExistingMessages ? undefined : readPersistedStartupSettings(sessionManager);
-      const persistedModel = persistedSettings?.model
-        && scope.visible.some(
-          (model) => model.provider === persistedSettings.model?.provider && model.id === persistedSettings.model?.modelId,
-        )
-        ? persistedSettings.model
-        : undefined;
-      const persistedThinking = persistedSettings?.thinkingLevel;
-      const requestedModel = runtimePolicy?.model ?? effectiveInitialModel ?? persistedModel;
-      const requestedThinking = thinkingLevel ?? persistedThinking;
-      const savedModel = hasExistingMessages
-        ? getLatestModelChange(branch as unknown as SessionEntry[])
-        : null;
-      const restoredModel = savedModel
-        ? services.modelRuntime.getModel(savedModel.provider, savedModel.modelId)
-        : undefined;
-      const initial = hasExistingMessages ? null : selectInitialModelScope(scope, {
-        ...(requestedModel ? { requestedModel } : {}),
+        : projectTrustReloadOptions(sessionCwd, agentDir);
+    const settingsManager = SettingsManager.create(sessionCwd, agentDir);
+    // Chat-only sessions and subagents that replace Pi's prompt send an exact
+    // system prompt. The prompt is resolved at prompt time through this inline
+    // extension: it may read the session's context files, which exist only
+    // after the session is created, so the getter is filled in below.
+    const exactSystemPromptRef: { current?: () => string } = {};
+    const exactSystemPromptExtension = createExactSystemPromptExtension(() => exactSystemPromptRef.current?.());
+    // codemode, tool-search, and mcp, as the pi CLI loads them, and the host that decides
+    // which MCP servers the session connects (ADR 0006).
+    const builtins = subagentResources || chatOnly
+      ? undefined
+      : await createPiWebBuiltinExtensions({ agentDir });
+    const subagentCodemode = subagentResources?.codemode
+      ? await createSubagentCodemodeExtension({
+          agentDir,
+          cwd: sessionCwd,
+          projectTrusted: () => settingsManager.isProjectTrusted(),
+        })
+      : undefined;
+    const subagentMcp = subagentResources?.mcp
+      ? await createSubagentMcpExtensions({
+          agentDir,
+          cwd: sessionCwd,
+          projectTrusted: () => settingsManager.isProjectTrusted(),
+          codemode: subagentResources.codemode === true,
+        })
+      : undefined;
+    const skillsBinding = subagentResources ? createSubagentSkillsBinding({
+      loadSkills: subagentResources.loadSkills,
+      skills: subagentResources.skills,
+      exactSystemPrompt: subagentResources.exactSystemPrompt
+        ?? (chatOnly ? subagentResources.appendSystemPrompt[0] ?? "" : undefined),
+    }) : undefined;
+    const subagentExtensionFactories = [
+      ...(subagentCodemode ? [subagentCodemode] : []),
+      ...(subagentMcp && subagentResources
+        ? [...subagentMcp.extensions, createSubagentMcpPolicyExtension(() => subagentResources)]
+        : []),
+      ...(skillsBinding?.loaderOptions.extensionFactories ?? []),
+    ];
+    const services = await createAgentSessionServices({
+      cwd: sessionCwd,
+      agentDir,
+      settingsManager,
+      resourceLoaderOptions: subagentResources
+        ? {
+            ...subagentExtensionLoaderOptions(subagentResources),
+            ...skillsBinding!.loaderOptions,
+            ...(subagentExtensionFactories.length > 0 ? { extensionFactories: subagentExtensionFactories } : {}),
+            noPromptTemplates: true,
+            noThemes: true,
+            noContextFiles: true,
+            ...(chatOnly
+              ? {
+                  systemPrompt: " ",
+                  systemPromptOverride: () => undefined,
+                }
+              : {}),
+            appendSystemPrompt: subagentResources.appendSystemPrompt,
+          }
+        : chatOnly
+          ? { ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS, extensionFactories: [exactSystemPromptExtension] }
+        : {
+            extensionFactories: [
+              ...(builtins?.extensions ?? []),
+              createReadOnlyMcpPolicyExtension(),
+              createProjectCommandBashExtension({
+                cwd: sessionCwd,
+                settings: settingsManager,
+              }),
+              createSubagentExtension(
+                SUBAGENT_CONTROLLER.extensionRuntime,
+                () => listSubagentProfiles(sessionCwd),
+                isBuiltInSubagentsEnabled,
+              ),
+            ],
+            extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),
+          },
+      ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
+    });
+    if (subagentResources?.codemode
+      && !services.resourceLoader.getExtensions().extensions.some((extension) => extension.tools.has("codemode"))) {
+      throw new Error("Code mode is unavailable: builtin:codemode was not registered");
+    }
+    const scope = await resolveVisibleModels(
+      services.modelRuntime,
+      services.settingsManager.getEnabledModels(),
+    );
+    // A provider an extension registers only at session_start (lib/deferred-provider-models.ts)
+    // has no model in this runtime yet: build on the default, switch once extensions are bound.
+    const deferredInitialModel = initialModel && !services.modelRuntime.getModel(initialModel.provider, initialModel.modelId)
+      ? findDeferredModel(services.modelRuntime, initialModel.provider, initialModel.modelId)
+      : undefined;
+    // Chat only loads no extensions, so that switch never comes: refuse the model the browser chose.
+    if (chatOnly && deferredInitialModel && !allowInitialModelFallback) {
+      throw chatOnlyExtensionModelError(deferredInitialModel.provider, deferredInitialModel.id);
+    }
+    const effectiveInitialModel = initialModel && !deferredInitialModel && (
+      !allowInitialModelFallback
+      || scope.visible.some((model) => model.provider === initialModel.provider && model.id === initialModel.modelId)
+    )
+      ? initialModel
+      : undefined;
+    const defaultProvider = services.settingsManager.getDefaultProvider();
+    const defaultModelId = services.settingsManager.getDefaultModel();
+    const branch = sessionManager.getBranch();
+    // System messages carry the prompt and tool loadout, not a conversation.
+    const hasExistingMessages = branch.some((entry) => entry.type === "message" && entry.message.role !== "system");
+    const savedModel = hasExistingMessages
+      ? getLatestModelChange(branch as unknown as SessionEntry[])
+      : null;
+    const restoredModel = savedModel
+      ? services.modelRuntime.getModel(savedModel.provider, savedModel.modelId)
+      : undefined;
+    const initial = hasExistingMessages ? null : selectInitialModelScope(scope, {
+        ...(effectiveInitialModel ? { requestedModel: effectiveInitialModel } : {}),
         ...(defaultProvider && defaultModelId
           ? { defaultModel: { provider: defaultProvider, modelId: defaultModelId } }
           : {}),
-        ...(requestedThinking ? { thinkingLevel: requestedThinking } : {}),
+        ...(thinkingLevel ? { thinkingLevel } : {}),
       });
-      const startupModel = restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
-        ? restoredModel
-        : initial?.model;
-      const initialScopedModels = initial?.scopedModels ?? [];
-      const { session: inner } = await createAgentSessionFromServices({
-        services,
-        sessionManager,
-        ...(startupModel ? { model: startupModel } : {}),
-        ...(initial?.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
-        ...(hasExistingMessages
-          ? { scopedModels: [...scope.scopedModels] }
-          : initialScopedModels.length > 0
-            ? { scopedModels: initialScopedModels }
-            : {}),
-        ...(subagentResources
-          ? subagentToolOptions(subagentResources)
-          : toolsOption !== undefined ? { tools: toolsOption } : {}),
-        ...(orchestrationPolicy ? { orchestratedWorkerRuntime: orchestrationLease } : {}),
-        ...(peerStartupPolicy ? { peerSessionRuntime: options.peerSessionRuntime } : {}),
-        ...(!orchestrationPolicy && sessionLease ? { sessionFileRuntime: sessionLease } : {}),
-      });
+    const startupModel = restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
+      ? restoredModel
+      : initial?.model;
+    const deferredModel = hasExistingMessages
+      ? savedModel && !restoredModel
+        ? findDeferredModel(services.modelRuntime, savedModel.provider, savedModel.modelId)
+        : undefined
+      : deferredInitialModel;
+    // The extension's model a Chat-only session wanted (saved, chosen or default); a prompt names
+    // it when the session ended up with no model at all.
+    const chatOnlyExtensionModel = chatOnly
+      ? deferredModel ?? (!hasExistingMessages && defaultProvider && defaultModelId
+        ? findDeferredModel(services.modelRuntime, defaultProvider, defaultModelId)
+        : undefined)
+      : undefined;
+    const { session: inner } = await createAgentSessionFromServices({
+      services,
+      sessionManager,
+      ...(startupModel ? { model: startupModel } : {}),
+      ...(initial?.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
+      ...(scope.scopedModels.length > 0 ? { scopedModels: [...scope.scopedModels] } : {}),
+      ...(subagentResources
+        ? subagentToolOptions(subagentResources)
+        : toolsOption !== undefined ? { tools: toolsOption } : {}),
+    });
 
-      // A pinned selection replaces only the coding tools of the SDK's initial loadout, which
-      // already holds the extension tools pi activates on registration and whatever
-      // `defaultTools` names (such as `+codemode`), so installed extensions stay usable in
-      // Pi Web just like in the `pi` CLI.
-      if (!subagentResources && !chatOnly) {
-        const initialToolNames = inner.getActiveToolNames();
-        inner.setActiveToolsByName(
-          resolveActiveToolNames(inner, selectedToolNames ?? initialToolNames, initialToolNames),
-        );
-      }
-
-      skillsBinding?.setActiveToolsGetter(() => inner.getActiveToolNames());
-      const exactSystemPrompt = subagentResources
-        ? skillsBinding!.getExactSystemPrompt
-        : chatOnly
-          ? () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
-          : undefined;
-      exactSystemPromptRef.current = exactSystemPrompt;
-      const deferredModel = hasExistingMessages
-        ? savedModel && !restoredModel
-          ? findDeferredModel(services.modelRuntime, savedModel.provider, savedModel.modelId)
-          : undefined
-        : deferredInitialModel;
-      // The extension's model a Chat-only session wanted (saved, chosen or default); a prompt names
-      // it when the session ended up with no model at all.
-      const chatOnlyExtensionModel = chatOnly
-        ? deferredModel ?? (!hasExistingMessages && defaultProvider && defaultModelId
-          ? findDeferredModel(services.modelRuntime, defaultProvider, defaultModelId)
-          : undefined)
-        : undefined;
-      const mcpHost = builtins?.mcpHost ?? subagentMcp?.mcpHost;
-      const wrapper = new AgentSessionWrapper(
-        inner,
-        runtimePolicy,
-        undefined,
-        ensureGenericSessionLease,
-        () => runtimeTarget,
-        {
-          ...(exactSystemPrompt ? { exactSystemPrompt } : {}),
-          chatOnly,
-          onAgentRunComplete: (completedSessionId, sessionName) => {
-            void notifySessionComplete(completedSessionId, sessionName).catch((error) => {
-              console.error("[pi-web] failed to send completion push:", error instanceof Error ? error.message : error);
-            });
-          },
-          suppressCompletionNotifications: Boolean(subagentResources),
-          ...(mcpHost ? { mcpHost } : {}),
-          ...(chatOnlyExtensionModel ? { chatOnlyExtensionModel } : {}),
-        },
+    // A pinned selection replaces only the coding tools of the SDK's initial loadout, which
+    // already holds the extension tools pi activates on registration and whatever
+    // `defaultTools` names (such as `+codemode`), so installed extensions stay usable in
+    // Pi Web just like in the `pi` CLI.
+    if (!subagentResources && !chatOnly) {
+      const initialToolNames = inner.getActiveToolNames();
+      inner.setActiveToolsByName(
+        resolveActiveToolNames(inner, selectedToolNames ?? initialToolNames, initialToolNames),
       );
-      startingWrapper = wrapper;
-      const forceEmptySystemPrompt = !runtimePolicy
-        && effectiveToolNames?.length === 0
-        && !options.preserveSystemPromptWithoutTools;
-      if (forceEmptySystemPrompt) wrapper.setForceEmptySystemPrompt(true);
-      wrapper.start();
-
-      if (runtimePolicy?.model) {
-        await wrapper.send({
-          type: "set_model",
-          provider: runtimePolicy.model.provider,
-          modelId: runtimePolicy.model.modelId,
-        });
-      }
-      if (runtimePolicy?.thinkingLevel) {
-        await wrapper.send({ type: "set_thinking_level", level: runtimePolicy.thinkingLevel });
-      }
-      if (runtimePolicy) {
-        await wrapper.send({
-          type: "set_tools_exact",
-          toolNames: runtimePolicy.toolNames,
-          preserveSystemPrompt: true,
-        });
-      }
-
-      if (!chatOnly) {
-        if (deferredModel) {
-          try {
-            await wrapper.waitUntilReady();
-            await wrapper.send({ type: "set_model", provider: deferredModel.provider, modelId: deferredModel.id });
-          } catch (error) {
-            console.error(`[pi-web] could not switch to ${deferredModel.provider}/${deferredModel.id}:`, error instanceof Error ? error.message : error);
-          }
-        }
-        // Bound extensions may have registered providers a later model listing will not see.
-        void wrapper.waitUntilReady()
-          .then(() => rememberProviderModels(inner.modelRuntime as ModelRuntime))
-          .catch(() => undefined);
-      }
-
-      const realSessionId = inner.sessionId as string;
-      const realSessionFile = inner.sessionFile as string | undefined;
-      if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
-
-      wrapper.onDestroy(async () => {
-        if (registry.get(realSessionId) === wrapper) registry.delete(realSessionId);
-        const leases = [orchestrationLease, sessionLease].filter(
-          (lease): lease is OrchestratedSessionRuntimeLease | SessionIdentityLease => lease !== undefined,
-        );
-        orchestrationLease = undefined;
-        sessionLease = undefined;
-        await Promise.all(leases.map((lease) => lease.release().catch(() => undefined)));
-      });
-      registry.set(realSessionId, wrapper);
-      wrapper.beginExtensionBinding({ forceEmptySystemPrompt });
-      return { session: wrapper, realSessionId, created: true };
-    } catch (error) {
-      startingWrapper?.destroy();
-      await orchestrationLease?.release().catch(() => undefined);
-      await sessionLease?.release().catch(() => undefined);
-      orchestrationLease = undefined;
-      sessionLease = undefined;
-      throw error;
     }
+
+    skillsBinding?.setActiveToolsGetter(() => inner.getActiveToolNames());
+    const exactSystemPrompt = subagentResources
+      ? skillsBinding!.getExactSystemPrompt
+      : chatOnly
+        ? () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
+        : undefined;
+    exactSystemPromptRef.current = exactSystemPrompt;
+    const mcpHost = builtins?.mcpHost ?? subagentMcp?.mcpHost;
+    const wrapper = new AgentSessionWrapper(inner, {
+      exactSystemPrompt,
+      chatOnly,
+      onAgentRunComplete: (completedSessionId, sessionName) => {
+        void notifySessionComplete(completedSessionId, sessionName).catch((error) => {
+          console.error("[pi-web] failed to send completion push:", error instanceof Error ? error.message : error);
+        });
+      },
+      suppressCompletionNotifications: Boolean(subagentResources),
+      ...(mcpHost ? { mcpHost } : {}),
+      ...(chatOnlyExtensionModel ? { chatOnlyExtensionModel } : {}),
+    });
+    const realSessionId = inner.sessionId as string;
+    registerRpcWrapper(wrapper);
+
+    if (!chatOnly) {
+      if (deferredModel) {
+        try {
+          await wrapper.waitUntilReady();
+          await wrapper.send({ type: "set_model", provider: deferredModel.provider, modelId: deferredModel.id });
+        } catch (error) {
+          console.error(`[pi-web] could not switch to ${deferredModel.provider}/${deferredModel.id}:`, error instanceof Error ? error.message : error);
+        }
+      }
+      // Bound extensions may have registered providers a later model listing will not see.
+      void wrapper.waitUntilReady()
+        .then(() => rememberProviderModels(inner.modelRuntime as ModelRuntime))
+        .catch(() => undefined);
+    }
+
+    return { session: wrapper, realSessionId };
   })().finally(() => {
     locks.delete(sessionId);
     finishStartingSession();
@@ -3930,21 +2715,4 @@ export async function startRpcSession(
 
   locks.set(sessionId, starting);
   return starting;
-}
-
-/** Start or reuse a peer only after an owner/scheduler path supplies host authority.
- * @author GPT-5.6 Sol
- * @version 1.0.0
- */
-export function startAuthorizedPeerRpcSession(
-  target: StoredSessionTarget,
-  peerSessionRuntime: PeerSessionRuntimeAuthority,
-  options: Omit<StartRpcSessionOptions, "peerOwnerHostCapability" | "peerSessionRuntime" | "expectedSessionTarget"> = {},
-): Promise<RpcSessionStartResult> {
-  return startRpcSession(target.sessionId, target.sessionFile, target.cwd, {
-    ...options,
-    peerOwnerHostCapability: PEER_OWNER_HOST_CAPABILITY,
-    peerSessionRuntime,
-    expectedSessionTarget: target,
-  });
 }

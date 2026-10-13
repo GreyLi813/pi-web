@@ -1,16 +1,5 @@
 // Types mirrored from pi-mono coding-agent session-manager
 
-export interface SessionOrchestrationMetadata {
-  version: 1;
-  ownerSessionId: string;
-  ownerSessionFile: string;
-  kind: "session" | "delegate";
-  depth: number;
-  toolProfile: "coding" | "read-only" | "none";
-  model?: { provider: string; modelId: string };
-  thinkingLevel?: string;
-}
-
 export interface SessionHeader {
   type: "session";
   version?: number;
@@ -18,7 +7,6 @@ export interface SessionHeader {
   timestamp: string;
   cwd: string;
   parentSession?: string;
-  orchestration?: SessionOrchestrationMetadata;
 }
 
 export interface SessionEntryBase {
@@ -378,9 +366,6 @@ export interface SessionInfo {
   /** True while the sidebar has only header/stat metadata for this session. */
   detailsPending?: boolean;
   parentSessionId?: string; // source session for a fork, or parent session for a subagent
-  orchestration?: SessionOrchestrationMetadata;
-  /** Peer metadata is display-only; all mutation stays on the owner-authorized host path. */
-  peer?: { ownerSessionId: string; depth: number; authorityId?: string };
   /** How this session relates to another session. Forks remain top-level in the
    *  UI; only subagent relations form a visible parent/child tree. */
   relation?:

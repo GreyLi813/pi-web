@@ -28,7 +28,6 @@ import { FolderIcon, getFileIcon } from "./FileIcons";
 import { ImagePreview } from "./ImagePreview";
 import { DismissButton } from "./DismissButton";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { SchedulesPanel } from "./SchedulesPanel";
 import { useEnterSendMode } from "@/hooks/useEnterSendMode";
 import { useI18n } from "@/hooks/useI18n";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
@@ -81,10 +80,6 @@ interface Props {
   onThinkingLevelChange?: (level: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => void;
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
-  /** Thinking levels indexed by provider:modelId for schedule model selection. */
-  thinkingLevelsByModel?: Record<string, string[]>;
-  /** Display mappings indexed by provider:modelId for schedule model selection. */
-  thinkingLevelMapsByModel?: Record<string, Record<string, string | null>>;
   /** `defaultThinkingLevel` saved in settings, starred in the reasoning menu. */
   savedDefaultThinkingLevel?: string | null;
   /** Saves a reasoning level as the default for new sessions and selects it here. */
@@ -103,10 +98,6 @@ interface Props {
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
-  /** Existing session receiving schedules created from this chat. */
-  sessionId?: string | null;
-  /** Create and promote a dedicated session when this is an unsaved chat. */
-  onEnsureScheduleSession?: () => Promise<string | null>;
   /** Files picked with the attach button, handled like files dropped onto the chat. Without it the button takes images only. */
   onAttachFiles?: (files: File[]) => void;
 }
@@ -662,7 +653,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   defaultModel, onSetDefaultModel,
   onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, isAutoThinkingSelection = false, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
-  thinkingLevelsByModel, thinkingLevelMapsByModel,
   savedDefaultThinkingLevel, onSetDefaultThinkingLevel,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
@@ -671,8 +661,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onPromptWithStreamingBehavior,
   draftKey,
   cwd,
-  sessionId,
-  onEnsureScheduleSession,
   onAttachFiles,
   compact = false,
 }: Props, ref) {
@@ -685,8 +673,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
-  const [schedulesPanelOpen, setSchedulesPanelOpen] = useState(false);
-
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
@@ -2252,34 +2238,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             );
           })()}
-          {/* Schedules panel popup - always mounted, hidden when closed (not mounted in compact composer) */}
-          {!compact && (
-          <div
-            style={{
-              position: "absolute",
-              left: 0,
-              right: 0,
-              bottom: "calc(100% + 8px)",
-              zIndex: 120,
-              display: schedulesPanelOpen ? "flex" : "none",
-              justifyContent: "center",
-            }}
-          >
-            <SchedulesPanel
-                onClose={() => setSchedulesPanelOpen(false)}
-                modelOptions={modelOptions.length > 0 ? modelOptions : undefined}
-                currentModel={model ?? null}
-                currentThinkingLevel={thinkingLevel ?? "auto"}
-                availableThinkingLevels={availableThinkingLevels ?? null}
-                thinkingLevelMap={thinkingLevelMap ?? null}
-                thinkingLevelsByModel={thinkingLevelsByModel}
-                thinkingLevelMapsByModel={thinkingLevelMapsByModel}
-                sessionId={sessionId ?? null}
-                canCreateSession={Boolean(cwd && onEnsureScheduleSession)}
-                onEnsureSession={onEnsureScheduleSession}
-              />
-          </div>
-          )}
           <div
             style={{
               minWidth: 0,
@@ -2571,42 +2529,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 backdropFilter: "blur(10px)",
               } : null),
             }}>
-            {/* Schedules button */}
-            {!isStreaming && (
-              <div style={{ position: "relative" }}>
-                <button
-                  onClick={() => setSchedulesPanelOpen((v) => !v)}
-                  title="Manage recurring schedules"
-                  aria-label="Manage schedules"
-                  style={{
-                    display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                    padding: isMobile ? "0 6px" : "8px 12px",
-                    height: 32,
-                    background: schedulesPanelOpen ? "var(--bg-hover)" : "none",
-                    border: "none",
-                    borderRadius: 9,
-                    color: schedulesPanelOpen ? "var(--accent)" : "var(--text-muted)",
-                    cursor: "pointer",
-                    fontSize: 12,
-                    transition: "background 0.12s, color 0.12s",
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = "var(--bg-hover)";
-                    e.currentTarget.style.color = "var(--accent)";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = schedulesPanelOpen ? "var(--bg-hover)" : "none";
-                    e.currentTarget.style.color = schedulesPanelOpen ? "var(--accent)" : "var(--text-muted)";
-                  }}
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10" />
-                    <polyline points="12 6 12 12 16 14" />
-                  </svg>
-                  {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>Schedule</span>}
-                </button>
-              </div>
-            )}
             {onThinkingLevelChange && (
               <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
                 <button

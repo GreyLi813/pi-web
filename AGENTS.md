@@ -3,7 +3,7 @@
 ## Quick Start
 
 ```bash
-npm run dev   # isolated test runtime, port 30142
+npm run dev   # port 30141
 ```
 
 Typecheck: `node_modules/.bin/tsc --noEmit` · Lint: `npm run lint`
@@ -47,8 +47,6 @@ app/api/
   agent/[id]/route.ts              GET state | POST any command
   agent/[id]/events/route.ts       GET SSE stream
   agent/running/route.ts           GET running + awaiting-input session ids, sidebar pins/archive revision
-  runtime/route.ts                 GET isolated test-runtime provenance
-  schedules/route.ts               GET/POST/DELETE session-bound schedules
   auth/api-key/[provider]/route.ts POST/DELETE stored provider API key
   auth/login/[provider]/route.ts   GET OAuth/device-code SSE | POST manual code
   auth/logout/[provider]/route.ts  POST OAuth logout
@@ -106,10 +104,6 @@ lib/
   sidebar-actions.ts        session row menu entries, a project group's name entries and rename request, fork refusal messages, delete-all requests
   session-links.ts          a session's same-instance link (?session=<id>) and the plain-click rule the sidebar keeps in the page
   new-session-context.ts    client-safe: what the project/worktree pickers show (project, worktrees, project list), lag-safe contextForCwd
-  runtime-paths.ts          isolated runtime path resolution
-  schedule-dispatch.ts      atomic scheduled-prompt dispatch
-  schedule-session.ts       fresh schedule-session promotion
-  session-orchestration-host.ts Clean persisted worker routing through the shared RPC registry
   normalize.ts              normalizeToolCalls(): file-format vs our toolCall field names
   types.ts                  shared TypeScript types
   pi-types.ts               local structural types for pi SDK objects
@@ -199,7 +193,6 @@ components/
   SubagentViewer.tsx       read-only right-panel tab of a subagent's transcript (polls the context route)
   PluginsConfig.tsx        Settings › Plugins: installed package plugins
   SkillsConfig.tsx         Settings › Skills: loaded, search, install
-  SchedulesPanel.tsx       session-bound schedule management
   McpConfig.tsx            Settings › MCP: servers, switches, exposure, remove/undo, Test, sign-in, Code mode, trust
   mcp-config-helpers.ts    pure helpers and requests for McpConfig
   McpSignIn.tsx            a server's Sign-in row in Settings › MCP
@@ -216,7 +209,6 @@ hooks/
   useAgentSession.ts       messages, streaming, SSE, fork/navigate, reconciliation; built-in slash commands (/session, bare /mcp)
   useStreamingSelector.ts  one value of the streaming store (lib/streaming-message.ts): a chunk re-renders only its subscribers
   useAudio.ts              completion sound + AudioContext unlock
-  useScheduleTicker.ts     dispatches due schedules while Pi Web is open
   useDragDrop.ts           chat drop zone: dropped files, folders marked
   useFilesPlacement.ts     per-browser choice: the desktop sidebar's file browser below the sessions or in its own tab
   useGroupDrag.ts          dragging a sidebar project group: mouse threshold, touch/pen long-press, auto-scroll, drop
@@ -249,13 +241,6 @@ Design decisions and traps live in `docs/agents/`, one note per area. Read every
 
 ---
 
-### Three independent session relationships — don't confuse them
-- **Fork** (Fork button on user message): creates a new `.jsonl` derived from earlier history. Shown via `parentSession`.
-- **In-session branch** (Continue button / BranchNavigator): calls `navigate_tree` within the same file. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=`.
-- **Orchestrated worker**: creates a clean persisted `.jsonl` with no copied messages and no `parentSession`. Its header binds ownership to both controller ID and exact controller file; the sidebar relationship is display-only.
-
-Worker prompts must use the existing RPC registry. A process-lifetime `proper-lockfile` lease rejects duplicate runtimes, while an opaque capability minted from the live persisted owner prevents generic SDK lease acquisition. `orchestrated_prompt` applies model/Thinking/prompt atomically and waits for completion. Generic CLI/SDK startup and every worker mutation path (Agent POST, auto-name, rename, Schedule) must reject workers; generic routes must never cold-start a worker. Read-only observation of an already-live worker through `GET /api/agent/[id]`, `GET /api/sessions/[id]/state`, and the per-worker SSE is allowed because its JSONL is already browsable in this local UI. Persisted worker model, Thinking, and exact tool policy override startup options. Worker resource loading preserves provider registrations but removes extension runtime handlers/tools/commands. Restricted workers use `set_tools_exact`. Never destroy or unlink a running/starting Session: reserve the ID locally, await idle wrapper cleanup, and acquire the cross-process deletion lease. Controller deletion and worker creation share the owner lock; a controller with workers cannot be deleted. Cancellation cleanup may unlink only an empty worker while holding owner, worker, and deletion locks.
-
 ## Old Safari (iOS 16.2)
 
 - `/` renders entirely on the client, so one script chunk the browser cannot parse is a blank page. Next 16 targets Safari 16.4+; the `browserslist` in `package.json` lowers Safari and iOS to 16.2 so SWC turns class `static {}` blocks into private static fields. That covers Next's client runtime; other node_modules keep their syntax unless listed in `transpilePackages` (mermaid and `@mermaid-js/parser` are, for their lazy diagram chunks). Keep the other browserslist entries at Next's defaults.
@@ -267,7 +252,6 @@ Location: `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
 
 ```jsonl
 {"type":"session","version":3,"id":"<uuid>","timestamp":"...","cwd":"/path","parentSession":"/abs/path/to/parent.jsonl"}
-{"type":"session","version":3,"id":"<worker-uuid>","timestamp":"...","cwd":"/path","orchestration":{"version":1,"ownerSessionId":"<controller-uuid>","ownerSessionFile":"/path/to/controller.jsonl","kind":"session","depth":1,"toolProfile":"read-only"}}
 {"type":"model_change","id":"<8hex>","parentId":null,"provider":"zenmux","modelId":"claude-sonnet-4-6","timestamp":"..."}
 {"type":"message","id":"<8hex>","parentId":"<8hex>","message":{"role":"user","content":"..."}}
 {"type":"message","id":"<8hex>","parentId":"<8hex>","message":{"role":"assistant","content":[...],...}}

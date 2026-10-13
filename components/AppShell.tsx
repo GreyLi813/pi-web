@@ -3,7 +3,6 @@
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
-import { useScheduleTicker } from "@/hooks/useScheduleTicker";
 import { SessionSidebar, type SelectSessionOptions, type SessionSidebarControl } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import { NewSessionContextBar, type NewSessionContextControl } from "./NewSessionContextBar";
@@ -100,7 +99,6 @@ function lastAgentTabId(tabs: readonly { sessionId: string }[]): string | null {
 }
 
 export function AppShell() {
-  useScheduleTicker();
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation, setInitialNavigation] = useState(() => getInitialNavigation(searchParams));

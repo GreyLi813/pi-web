@@ -1,20 +1,6 @@
 import { NextResponse } from "next/server";
-import { existsSync } from "fs";
-import { verifySessionTarget } from "@earendil-works/pi-coding-agent";
-import { assertGenericSessionMutationAllowed } from "@/lib/model-controlled-session";
 import { resolveSessionPath } from "@/lib/session-reader";
-import { getRpcRuntimeInstanceId, startRpcSession, getRpcSession, setRpcSessionTools } from "@/lib/rpc-manager";
-
-/** Reject generic routes that would bypass durable controller ownership.
- * @author GPT-5.6 Sol
- * @version 1.0.0
- */
-function controlledRouteRejection(): NextResponse {
-  return NextResponse.json(
-    { error: "Peer Sessions can only be accessed through peer owner authority; orchestrated workers can only be accessed through their owning controller Session" },
-    { status: 403 },
-  );
-}
+import { startRpcSession, getRpcSession, setRpcSessionTools } from "@/lib/rpc-manager";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -40,24 +26,9 @@ export async function POST(
     // Fast path: already-running session
     const existing = getRpcSession(id);
     if (body.type === "set_tools") {
-      if (existing?.isAlive() && existing.isRestrictedModelControlledSession()) {
-        return controlledRouteRejection();
-      }
       const filePath = existing?.sessionFile || await resolveSessionPath(id) || undefined;
       if (!existing?.isAlive() && !filePath) {
         return NextResponse.json({ error: "Session not found" }, { status: 404 });
-      }
-      if (!existing?.isAlive()) {
-        if (!filePath) {
-          return NextResponse.json({ error: "Session not found" }, { status: 404 });
-        }
-        // Generic routes must never cold-start a controlled session.
-        const target = await verifySessionTarget({ sessionId: id, sessionFile: filePath });
-        try {
-          await assertGenericSessionMutationAllowed(target, "accessed");
-        } catch {
-          return controlledRouteRejection();
-        }
       }
       const changed = await setRpcSessionTools(id, filePath, toolNames);
       return NextResponse.json({
@@ -66,19 +37,6 @@ export async function POST(
       });
     }
     if (existing?.isAlive()) {
-      if (existing.isRestrictedModelControlledSession()) return controlledRouteRejection();
-      // A freshly ensured Session defers its first persist until the first
-      // assistant response, so sessionFile can be a planned path that does not
-      // exist on disk yet. Its identity was already leased at startup; only
-      // verify files that actually exist.
-      if (existing.sessionFile && existsSync(existing.sessionFile)) {
-        const target = await verifySessionTarget({ sessionId: id, sessionFile: existing.sessionFile });
-        try {
-          await assertGenericSessionMutationAllowed(target, "accessed");
-        } catch {
-          return controlledRouteRejection();
-        }
-      }
       const result = await existing.send(body);
       promptAccepted = body.type === "prompt";
       return NextResponse.json({ success: true, data: result });
@@ -94,17 +52,9 @@ export async function POST(
       }, { status: 404 });
     }
 
-    let session;
-    try {
-      ({ session } = await startRpcSession(id, filePath, undefined, {
-        ...(toolNames !== undefined ? { toolNames } : {}),
-      }));
-    } catch (error) {
-      if (error instanceof Error && /owning controller|controller authority/.test(error.message)) {
-        return controlledRouteRejection();
-      }
-      throw error;
-    }
+    const { session } = await startRpcSession(id, filePath, undefined, {
+      ...(toolNames !== undefined ? { toolNames } : {}),
+    });
     const result = await session.send(body);
     promptAccepted = body.type === "prompt";
 
@@ -129,13 +79,11 @@ export async function GET(
   try {
     const session = getRpcSession(id);
     if (!session || !session.isAlive()) {
-      return NextResponse.json({ running: false, runtimeInstanceId: getRpcRuntimeInstanceId() });
+      return NextResponse.json({ running: false });
     }
 
-    // Read-only observation of a live worker is allowed: its JSONL is already
-    // browsable in this local UI. Only mutation/startup paths stay forbidden.
     const state = await session.send({ type: "get_state" });
-    return NextResponse.json({ running: true, runtimeInstanceId: getRpcRuntimeInstanceId(), state });
+    return NextResponse.json({ running: true, state });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
